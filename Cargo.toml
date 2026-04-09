@@ -1,0 +1,38 @@
+[package]
+name = "scribe"
+version = "0.1.0"
+edition = "2024"
+description = "Local meeting transcription and note generation"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client for OpenRouter API
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Audio capture (WASAPI loopback on Windows)
+cpal = "0.15"
+
+# WAV file writing
+hound = "3.5"
+
+# CLI and config
+clap = { version = "4", features = ["derive"] }
+dirs = "6"
+toml = "0.8"
+
+# Error handling
+anyhow = "1"
+
+# Timestamps for filenames
+chrono = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+tray-item = "0.10"
+windows = { version = "0.58", features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+] }
