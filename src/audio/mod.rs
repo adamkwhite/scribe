@@ -281,3 +281,132 @@ pub fn create_session_dir(name: Option<&str>) -> Result<PathBuf> {
     std::fs::create_dir_all(&session_dir)?;
     Ok(session_dir)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::thread::sleep;
+    use std::time::Duration;
+
+    #[test]
+    fn to_mono_passes_through_single_channel() {
+        let input = vec![0.1, 0.2, 0.3, 0.4];
+        assert_eq!(to_mono_f32(&input, 1), input);
+    }
+
+    #[test]
+    fn to_mono_averages_stereo_channels() {
+        let input = vec![0.0, 1.0, 0.5, 0.5, -1.0, 1.0];
+        let result = to_mono_f32(&input, 2);
+        assert_eq!(result, vec![0.5, 0.5, 0.0]);
+    }
+
+    #[test]
+    fn to_mono_handles_empty_input() {
+        let input: Vec<f32> = vec![];
+        assert_eq!(to_mono_f32(&input, 2), Vec::<f32>::new());
+    }
+
+    #[test]
+    fn i16_conversion_preserves_amplitude() {
+        let input: Vec<i16> = vec![i16::MAX, 0, i16::MIN];
+        let result = i16_to_mono_f32(&input, 1);
+        assert!((result[0] - 1.0).abs() < 1e-4);
+        assert_eq!(result[1], 0.0);
+        // i16::MIN / i16::MAX is slightly less than -1.0 (asymmetric range)
+        assert!(result[2] < -0.999);
+    }
+
+    #[test]
+    fn mix_buffer_combines_both_streams() {
+        let mut buf = MixBuffer::new();
+        buf.loopback.extend([0.2, 0.4]);
+        buf.mic.extend([0.1, 0.2]);
+        let mixed = buf.drain_mixed();
+        // Output: loopback + mic * 1.5, clamped
+        assert_eq!(mixed.len(), 2);
+        assert!((mixed[0] - (0.2 + 0.1 * 1.5)).abs() < 1e-6);
+        assert!((mixed[1] - (0.4 + 0.2 * 1.5)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_buffer_pads_shorter_stream_with_silence() {
+        let mut buf = MixBuffer::new();
+        buf.loopback.extend([0.5, 0.5, 0.5]);
+        buf.mic.extend([0.1]);
+        let mixed = buf.drain_mixed();
+        // Three samples out: first uses both, last two pad mic with 0.0
+        assert_eq!(mixed.len(), 3);
+        assert!((mixed[0] - (0.5 + 0.1 * 1.5)).abs() < 1e-6);
+        assert!((mixed[1] - 0.5).abs() < 1e-6);
+        assert!((mixed[2] - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn mix_buffer_clamps_to_unit_range() {
+        let mut buf = MixBuffer::new();
+        buf.loopback.extend([0.9, -0.9]);
+        buf.mic.extend([0.9, -0.9]);
+        let mixed = buf.drain_mixed();
+        // 0.9 + 0.9*1.5 = 2.25 → clamped to 1.0; -2.25 → -1.0
+        assert_eq!(mixed[0], 1.0);
+        assert_eq!(mixed[1], -1.0);
+    }
+
+    #[test]
+    fn mix_buffer_drains_to_empty() {
+        let mut buf = MixBuffer::new();
+        buf.loopback.extend([0.1]);
+        buf.mic.extend([0.2]);
+        let _ = buf.drain_mixed();
+        assert!(buf.loopback.is_empty());
+        assert!(buf.mic.is_empty());
+    }
+
+    #[test]
+    fn latest_session_returns_most_recent_with_recording() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().to_path_buf();
+
+        let older = base.join("session-1");
+        fs::create_dir_all(&older).unwrap();
+        fs::write(older.join("recording.wav"), b"fake").unwrap();
+
+        sleep(Duration::from_millis(20));
+
+        let newer = base.join("session-2");
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(newer.join("recording.wav"), b"fake").unwrap();
+
+        let result = latest_session(&base).unwrap();
+        assert_eq!(result, newer);
+    }
+
+    #[test]
+    fn latest_session_skips_dirs_without_recording() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().to_path_buf();
+
+        let with_recording = base.join("good");
+        fs::create_dir_all(&with_recording).unwrap();
+        fs::write(with_recording.join("recording.wav"), b"fake").unwrap();
+
+        sleep(Duration::from_millis(20));
+
+        // Newer directory but no recording.wav — should be skipped
+        let without_recording = base.join("empty");
+        fs::create_dir_all(&without_recording).unwrap();
+
+        let result = latest_session(&base).unwrap();
+        assert_eq!(result, with_recording);
+    }
+
+    #[test]
+    fn latest_session_errors_when_no_sessions() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().to_path_buf();
+        let result = latest_session(&base);
+        assert!(result.is_err());
+    }
+}
