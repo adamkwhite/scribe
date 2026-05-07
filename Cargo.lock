@@ -1533,6 +1533,7 @@ dependencies = [
  "toml",
  "tray-item",
  "windows 0.58.0",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

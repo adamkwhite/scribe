@@ -35,4 +35,9 @@ tray-item = "0.10"
 windows = { version = "0.58", features = [
     "Win32_Media_Audio",
     "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# tray-item uses windows-sys for HICON, we need to bridge types
+windows-sys = { version = "0.52", features = [
+    "Win32_UI_WindowsAndMessaging",
 ] }
