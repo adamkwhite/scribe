@@ -56,7 +56,8 @@ fn i16_to_mono_f32(data: &[i16], channels: u16) -> Vec<f32> {
 
 /// Record system audio (loopback) + microphone, mixed into one WAV file.
 /// On Windows, uses WASAPI for both streams.
-pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32) -> Result<()> {
+/// Saves to `session_dir/recording.wav`.
+pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32, session_dir: PathBuf) -> Result<()> {
     #[cfg(target_os = "windows")]
     let host = cpal::host_from_id(cpal::HostId::Wasapi)
         .context("WASAPI host not available")?;
@@ -114,9 +115,8 @@ pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32) -> 
         sample_format: hound::SampleFormat::Int,
     };
 
-    let output_dir = config::output_dir()?;
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let wav_path = output_dir.join(format!("recording_{timestamp}.wav"));
+    std::fs::create_dir_all(&session_dir)?;
+    let wav_path = session_dir.join("recording.wav");
 
     let writer = WavWriter::create(&wav_path, spec)
         .with_context(|| format!("Failed to create {}", wav_path.display()))?;
@@ -251,15 +251,11 @@ pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32) -> 
     Ok(())
 }
 
-/// Find the most recent WAV file in the output directory.
-pub fn latest_recording(dir: &PathBuf) -> Result<PathBuf> {
-    let mut entries: Vec<_> = std::fs::read_dir(dir)?
+/// Find the most recent session directory containing a recording.wav.
+pub fn latest_session(base_dir: &PathBuf) -> Result<PathBuf> {
+    let mut entries: Vec<_> = std::fs::read_dir(base_dir)?
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            e.path()
-                .extension()
-                .is_some_and(|ext| ext == "wav")
-        })
+        .filter(|e| e.path().is_dir() && e.path().join("recording.wav").exists())
         .collect();
 
     entries.sort_by_key(|e| {
@@ -272,4 +268,17 @@ pub fn latest_recording(dir: &PathBuf) -> Result<PathBuf> {
         .last()
         .map(|e| e.path())
         .context("No recordings found")
+}
+
+/// Create a new session directory with optional name.
+pub fn create_session_dir(name: Option<&str>) -> Result<PathBuf> {
+    let base = config::output_dir()?;
+    let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
+    let dir_name = match name {
+        Some(n) if !n.is_empty() => format!("{timestamp} — {n}"),
+        _ => format!("{timestamp}"),
+    };
+    let session_dir = base.join(dir_name);
+    std::fs::create_dir_all(&session_dir)?;
+    Ok(session_dir)
 }
