@@ -8,8 +8,8 @@ mod tray;
 use anyhow::Result;
 use clap::Parser;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 #[derive(Parser)]
 #[command(name = "scribe", about = "Meeting transcription & notes")]
@@ -104,7 +104,9 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                 }
 
                 // Extract optional name: "r My Meeting" or just "r"
-                let name = cmd.strip_prefix("record").or(cmd.strip_prefix("r"))
+                let name = cmd
+                    .strip_prefix("record")
+                    .or(cmd.strip_prefix("r"))
                     .map(|s| s.trim())
                     .filter(|s| !s.is_empty())
                     .map(|s| s.to_string());

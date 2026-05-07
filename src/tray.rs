@@ -1,6 +1,6 @@
 use anyhow::Result;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tray_item::TrayItem;
 
 use crate::{audio, config, process_recording, prompt_session_name_gui};
@@ -32,7 +32,7 @@ fn create_default_icon() -> tray_item::IconSource {
             for x in 0..width {
                 let idx = ((y * width + x) * 4) as usize;
                 // Dark teal/green background
-                xor_mask[idx] = 0x80;     // B
+                xor_mask[idx] = 0x80; // B
                 xor_mask[idx + 1] = 0xB0; // G
                 xor_mask[idx + 2] = 0x40; // R
                 xor_mask[idx + 3] = 0xFF; // A
@@ -42,20 +42,47 @@ fn create_default_icon() -> tray_item::IconSource {
         // Draw a simple "S" shape in white
         let s_pixels: &[(i32, i32)] = &[
             // Top bar
-            (4,2),(5,2),(6,2),(7,2),(8,2),(9,2),(10,2),(11,2),
+            (4, 2),
+            (5, 2),
+            (6, 2),
+            (7, 2),
+            (8, 2),
+            (9, 2),
+            (10, 2),
+            (11, 2),
             // Left side upper
-            (3,3),(3,4),(3,5),(3,6),
+            (3, 3),
+            (3, 4),
+            (3, 5),
+            (3, 6),
             // Middle bar
-            (4,7),(5,7),(6,7),(7,7),(8,7),(9,7),(10,7),(11,7),
+            (4, 7),
+            (5, 7),
+            (6, 7),
+            (7, 7),
+            (8, 7),
+            (9, 7),
+            (10, 7),
+            (11, 7),
             // Right side lower
-            (12,8),(12,9),(12,10),(12,11),
+            (12, 8),
+            (12, 9),
+            (12, 10),
+            (12, 11),
             // Bottom bar
-            (4,12),(5,12),(6,12),(7,12),(8,12),(9,12),(10,12),(11,12),
+            (4, 12),
+            (5, 12),
+            (6, 12),
+            (7, 12),
+            (8, 12),
+            (9, 12),
+            (10, 12),
+            (11, 12),
         ];
 
         for &(x, y) in s_pixels {
             let idx = ((y * width + x) * 4) as usize;
-            xor_mask[idx] = 0xFF;     // B
+            xor_mask[idx] = 0xFF; // B
             xor_mask[idx + 1] = 0xFF; // G
             xor_mask[idx + 2] = 0xFF; // R
             xor_mask[idx + 3] = 0xFF; // A
@@ -94,8 +121,7 @@ pub async fn run(cfg: config::Config) -> Result<()> {
 
     std::thread::spawn(move || {
         let icon = create_default_icon();
-        let mut tray = TrayItem::new("Scribe", icon)
-            .expect("Failed to create tray icon");
+        let mut tray = TrayItem::new("Scribe", icon).expect("Failed to create tray icon");
 
         tray.add_label("Scribe — Meeting Notes").ok();
 

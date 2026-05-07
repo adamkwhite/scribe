@@ -70,7 +70,10 @@ pub async fn generate(transcript: &str, cfg: &Config) -> Result<String> {
 
     let response = client
         .post(OPENROUTER_URL)
-        .header("Authorization", format!("Bearer {}", cfg.openrouter_api_key))
+        .header(
+            "Authorization",
+            format!("Bearer {}", cfg.openrouter_api_key),
+        )
         .header("Content-Type", "application/json")
         .json(&request)
         .send()

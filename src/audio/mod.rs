@@ -57,10 +57,13 @@ fn i16_to_mono_f32(data: &[i16], channels: u16) -> Vec<f32> {
 /// Record system audio (loopback) + microphone, mixed into one WAV file.
 /// On Windows, uses WASAPI for both streams.
 /// Saves to `session_dir/recording.wav`.
-pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32, session_dir: PathBuf) -> Result<()> {
+pub fn record_loopback(
+    recording: Arc<AtomicBool>,
+    _target_sample_rate: u32,
+    session_dir: PathBuf,
+) -> Result<()> {
     #[cfg(target_os = "windows")]
-    let host = cpal::host_from_id(cpal::HostId::Wasapi)
-        .context("WASAPI host not available")?;
+    let host = cpal::host_from_id(cpal::HostId::Wasapi).context("WASAPI host not available")?;
 
     #[cfg(not(target_os = "windows"))]
     let host = cpal::default_host();
@@ -81,10 +84,7 @@ pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32, ses
         .default_input_device()
         .context("No default input (mic) device found")?;
 
-    println!(
-        "Loopback: {}",
-        loopback_device.name().unwrap_or_default()
-    );
+    println!("Loopback: {}", loopback_device.name().unwrap_or_default());
     println!("Mic: {}", mic_device.name().unwrap_or_default());
 
     let loopback_config = loopback_device
@@ -209,14 +209,13 @@ pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32, ses
 
         if let Ok(mut m) = mix.lock() {
             let mixed = m.drain_mixed();
-            if !mixed.is_empty() {
-                if let Ok(mut guard) = writer.lock() {
-                    if let Some(ref mut w) = *guard {
-                        for sample in &mixed {
-                            let s = (*sample * i16::MAX as f32) as i16;
-                            let _ = w.write_sample(s);
-                        }
-                    }
+            if !mixed.is_empty()
+                && let Ok(mut guard) = writer.lock()
+                && let Some(ref mut w) = *guard
+            {
+                for sample in &mixed {
+                    let s = (*sample * i16::MAX as f32) as i16;
+                    let _ = w.write_sample(s);
                 }
             }
         }
@@ -230,21 +229,21 @@ pub fn record_loopback(recording: Arc<AtomicBool>, _target_sample_rate: u32, ses
     if let Ok(mut m) = mix.lock() {
         // Write remaining from whichever buffer still has data
         let mixed = m.drain_mixed();
-        if let Ok(mut guard) = writer.lock() {
-            if let Some(ref mut w) = *guard {
-                for sample in &mixed {
-                    let s = (*sample * i16::MAX as f32) as i16;
-                    let _ = w.write_sample(s);
-                }
+        if let Ok(mut guard) = writer.lock()
+            && let Some(ref mut w) = *guard
+        {
+            for sample in &mixed {
+                let s = (*sample * i16::MAX as f32) as i16;
+                let _ = w.write_sample(s);
             }
         }
     }
 
     // Finalize the WAV file
-    if let Ok(mut guard) = writer.lock() {
-        if let Some(w) = guard.take() {
-            w.finalize().context("Failed to finalize WAV")?;
-        }
+    if let Ok(mut guard) = writer.lock()
+        && let Some(w) = guard.take()
+    {
+        w.finalize().context("Failed to finalize WAV")?;
     }
 
     println!("Saved recording to: {}", wav_path.display());
