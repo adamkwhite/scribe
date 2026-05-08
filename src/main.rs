@@ -5,7 +5,7 @@ mod transcribe;
 #[cfg(target_os = "windows")]
 mod tray;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::Parser;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,6 +86,7 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
     let recording = Arc::new(AtomicBool::new(false));
     let current_session: Arc<std::sync::Mutex<Option<PathBuf>>> =
         Arc::new(std::sync::Mutex::new(None));
+    let mut recording_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
 
     println!("scribe — meeting transcription & notes");
     println!("Commands: [r]ecord, [s]top, [t]ranscribe last, [q]uit\n");
@@ -123,11 +124,9 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                 recording.store(true, Ordering::Relaxed);
                 let rec = recording.clone();
                 let sample_rate = cfg.sample_rate;
-                tokio::task::spawn_blocking(move || {
-                    if let Err(e) = audio::record_loopback(rec, sample_rate, session_dir) {
-                        eprintln!("Recording error: {e}");
-                    }
-                });
+                recording_task = Some(tokio::task::spawn_blocking(move || {
+                    audio::record_loopback(rec, sample_rate, session_dir)
+                }));
                 println!("Recording started. Press 's' to stop.");
             }
             "s" | "stop" => {
@@ -136,7 +135,9 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                     continue;
                 }
                 recording.store(false, Ordering::Relaxed);
-                println!("Recording stopped. Processing...");
+                println!("Recording stopped. Finalizing...");
+                wait_for_recording_task(&mut recording_task).await?;
+                println!("Processing...");
                 process_recording(&cfg).await?;
             }
             "t" | "transcribe" => {
@@ -144,6 +145,7 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
             }
             "q" | "quit" => {
                 recording.store(false, Ordering::Relaxed);
+                wait_for_recording_task(&mut recording_task).await?;
                 println!("Bye.");
                 break;
             }
@@ -153,4 +155,37 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
     }
 
     Ok(())
+}
+
+async fn wait_for_recording_task(
+    recording_task: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+) -> Result<()> {
+    if let Some(task) = recording_task.take() {
+        task.await.context("Recording task failed to join")??;
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+    use std::time::Duration;
+
+    #[tokio::test]
+    async fn wait_for_recording_task_awaits_finalization_before_returning() {
+        let finalized = Arc::new(AtomicBool::new(false));
+        let finalized_in_task = finalized.clone();
+        let mut recording_task = Some(tokio::task::spawn_blocking(move || {
+            std::thread::sleep(Duration::from_millis(25));
+            finalized_in_task.store(true, Ordering::SeqCst);
+            Ok(())
+        }));
+
+        wait_for_recording_task(&mut recording_task).await.unwrap();
+
+        assert!(recording_task.is_none());
+        assert!(finalized.load(Ordering::SeqCst));
+    }
 }
