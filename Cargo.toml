@@ -4,6 +4,10 @@ version = "0.1.0"
 edition = "2024"
 description = "Local meeting transcription and note generation"
 
+[features]
+default = []
+embedded-whisper = ["dep:whisper-rs"]
+
 [dependencies]
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -18,6 +22,9 @@ cpal = "0.15"
 
 # WAV file writing
 hound = "3.5"
+
+# Optional in-process whisper.cpp integration
+whisper-rs = { version = "0.16", default-features = false, optional = true }
 
 # CLI and config
 clap = { version = "4", features = ["derive"] }

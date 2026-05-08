@@ -40,5 +40,9 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
+      - name: Build embedded whisper feature
+        if: matrix.os == 'ubuntu-latest'
+        run: cargo build --verbose --features embedded-whisper
+
       - name: Test
         run: cargo test --verbose

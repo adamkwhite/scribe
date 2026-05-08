@@ -5,7 +5,8 @@ use std::path::PathBuf;
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {
     /// Path to whisper.cpp executable
-    pub whisper_bin: String,
+    #[serde(default)]
+    pub whisper_bin: Option<String>,
 
     /// Path to whisper model file (e.g., ggml-base.en.bin)
     pub whisper_model: String,
@@ -62,7 +63,7 @@ pub fn load_or_create() -> Result<Config> {
     } else {
         // Create a default config for the user to fill in
         let config = Config {
-            whisper_bin: "whisper-cli".to_string(),
+            whisper_bin: default_whisper_bin(),
             whisper_model: "ggml-base.en.bin".to_string(),
             openrouter_api_key: "YOUR_KEY_HERE".to_string(),
             model: default_model(),
@@ -75,9 +76,25 @@ pub fn load_or_create() -> Result<Config> {
         std::fs::write(&path, &toml_str)?;
 
         println!("Created config at: {}", path.display());
-        println!("Please edit it with your whisper.cpp path and OpenRouter API key.\n");
+        println!("Please edit it with your whisper model path and OpenRouter API key.");
+        #[cfg(not(feature = "embedded-whisper"))]
+        println!("Set whisper_bin to your whisper.cpp executable path.\n");
+        #[cfg(feature = "embedded-whisper")]
+        println!();
 
         Ok(config)
+    }
+}
+
+fn default_whisper_bin() -> Option<String> {
+    #[cfg(feature = "embedded-whisper")]
+    {
+        None
+    }
+
+    #[cfg(not(feature = "embedded-whisper"))]
+    {
+        Some("whisper-cli".to_string())
     }
 }
 
@@ -96,7 +113,7 @@ mod tests {
             output_dir = "/tmp/scribe-out"
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
-        assert_eq!(cfg.whisper_bin, "/usr/bin/whisper-cli");
+        assert_eq!(cfg.whisper_bin.as_deref(), Some("/usr/bin/whisper-cli"));
         assert_eq!(cfg.whisper_model, "/models/ggml-base.en.bin");
         assert_eq!(cfg.openrouter_api_key, "sk-or-test");
         assert_eq!(cfg.model, "anthropic/claude-3-5-sonnet");
@@ -112,16 +129,26 @@ mod tests {
             openrouter_api_key = "sk-or-test"
         "#;
         let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert_eq!(cfg.whisper_bin.as_deref(), Some("whisper-cli"));
         assert_eq!(cfg.model, "google/gemini-2.5-flash");
         assert_eq!(cfg.sample_rate, 16000);
         assert!(cfg.output_dir.is_none());
     }
 
     #[test]
-    fn rejects_config_missing_required_field() {
-        // openrouter_api_key is required (no default)
+    fn parses_config_without_whisper_bin() {
         let toml_str = r#"
-            whisper_bin = "whisper-cli"
+            whisper_model = "ggml-base.en.bin"
+            openrouter_api_key = "sk-or-test"
+        "#;
+        let cfg: Config = toml::from_str(toml_str).unwrap();
+        assert!(cfg.whisper_bin.is_none());
+        assert_eq!(cfg.whisper_model, "ggml-base.en.bin");
+    }
+
+    #[test]
+    fn rejects_config_missing_api_key() {
+        let toml_str = r#"
             whisper_model = "ggml-base.en.bin"
         "#;
         let result: Result<Config, _> = toml::from_str(toml_str);
@@ -131,7 +158,7 @@ mod tests {
     #[test]
     fn round_trips_through_toml() {
         let original = Config {
-            whisper_bin: "whisper".into(),
+            whisper_bin: Some("whisper".into()),
             whisper_model: "model.bin".into(),
             openrouter_api_key: "key".into(),
             model: "some/model".into(),
