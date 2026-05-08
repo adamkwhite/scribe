@@ -59,3 +59,15 @@ scribe
 ```
 
 Notes are saved as timestamped Markdown files in `~/Documents/scribe/`.
+
+### Terminal UI
+
+Build with the optional TUI feature to enable the `--tui` launch mode:
+
+```sh
+cargo run --features tui -- --tui
+```
+
+The TUI provides first-run setup, session browsing, recording, processing
+progress, and folder-opening actions. Without the `tui` feature, the `--tui`
+flag is not available.

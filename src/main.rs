@@ -1,9 +1,13 @@
 mod audio;
 mod config;
 mod notes;
+#[cfg(any(feature = "tui", target_os = "windows"))]
+mod opener;
 mod transcribe;
 #[cfg(target_os = "windows")]
 mod tray;
+#[cfg(feature = "tui")]
+mod tui;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -17,11 +21,22 @@ struct Args {
     /// Run in CLI mode instead of system tray
     #[arg(long)]
     cli: bool,
+
+    /// Run the terminal user interface
+    #[cfg(feature = "tui")]
+    #[arg(long)]
+    tui: bool,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    #[cfg(feature = "tui")]
+    if args.tui {
+        return tui::run().await;
+    }
+
     let cfg = config::load_or_create().await?;
 
     if args.cli {
@@ -41,8 +56,13 @@ async fn main() -> Result<()> {
 
 /// Process the most recent session: transcribe + generate notes.
 pub async fn process_recording(cfg: &config::Config) -> Result<()> {
-    let output_dir = config::output_dir()?;
+    let output_dir = config::effective_output_dir(cfg)?;
     let session_dir = audio::latest_session(&output_dir)?;
+    process_session(cfg, &session_dir).await
+}
+
+/// Process a specific session: transcribe + generate notes.
+pub async fn process_session(cfg: &config::Config, session_dir: &std::path::Path) -> Result<()> {
     let wav_path = session_dir.join("recording.wav");
     println!("Found: {}", session_dir.display());
 
@@ -116,7 +136,7 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                     println!("Tip: use 'r Meeting Name' to name your recording.");
                 }
 
-                let session_dir = audio::create_session_dir(name.as_deref())?;
+                let session_dir = audio::create_session_dir(&cfg, name.as_deref())?;
                 println!("Session: {}", session_dir.display());
 
                 *current_session.lock().unwrap() = Some(session_dir.clone());

@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_item::TrayItem;
 
-use crate::{audio, config, process_recording, prompt_session_name_gui};
+use crate::{audio, config, opener, process_recording, prompt_session_name_gui};
 
 enum TrayEvent {
     StartRecording,
@@ -180,7 +180,7 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                     .await
                     .unwrap_or(None);
 
-                let session_dir = match audio::create_session_dir(name.as_deref()) {
+                let session_dir = match audio::create_session_dir(&cfg, name.as_deref()) {
                     Ok(d) => d,
                     Err(e) => {
                         eprintln!("Failed to create session: {e}");
@@ -211,10 +211,8 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                 }
             }
             TrayEvent::OpenNotes => {
-                if let Ok(dir) = config::output_dir() {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(dir.to_string_lossy().as_ref())
-                        .spawn();
+                if let Ok(dir) = config::effective_output_dir(&cfg) {
+                    let _ = opener::open_folder(&dir);
                 }
             }
             TrayEvent::OpenSettings => {

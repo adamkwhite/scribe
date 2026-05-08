@@ -2,11 +2,30 @@ use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use crate::config;
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub enum SessionStatus {
+    Empty,
+    RecordingOnly,
+    TranscriptReady,
+    NotesReady,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub struct SessionEntry {
+    pub path: PathBuf,
+    pub name: String,
+    pub status: SessionStatus,
+    pub modified: SystemTime,
+}
 
 /// Shared buffer for mixing two audio streams.
 /// Each stream pushes mono f32 samples; the writer drains and mixes them.
@@ -270,8 +289,12 @@ pub fn latest_session(base_dir: &PathBuf) -> Result<PathBuf> {
 }
 
 /// Create a new session directory with optional name.
-pub fn create_session_dir(name: Option<&str>) -> Result<PathBuf> {
-    let base = config::output_dir()?;
+pub fn create_session_dir(cfg: &config::Config, name: Option<&str>) -> Result<PathBuf> {
+    let base = config::effective_output_dir(cfg)?;
+    create_session_dir_in(&base, name)
+}
+
+pub fn create_session_dir_in(base: &Path, name: Option<&str>) -> Result<PathBuf> {
     let timestamp = chrono::Local::now().format("%Y-%m-%d_%H%M%S");
     let dir_name = match name {
         Some(n) if !n.is_empty() => format!("{timestamp} — {n}"),
@@ -280,6 +303,56 @@ pub fn create_session_dir(name: Option<&str>) -> Result<PathBuf> {
     let session_dir = base.join(dir_name);
     std::fs::create_dir_all(&session_dir)?;
     Ok(session_dir)
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub fn list_sessions(base_dir: &Path) -> Result<Vec<SessionEntry>> {
+    if !base_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut entries: Vec<_> = std::fs::read_dir(base_dir)
+        .with_context(|| format!("Failed to read {}", base_dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if !path.is_dir() {
+                return None;
+            }
+
+            let metadata = entry.metadata().ok()?;
+            let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            let status = session_status(&path);
+
+            Some(SessionEntry {
+                path,
+                name,
+                status,
+                modified,
+            })
+        })
+        .collect();
+
+    entries.sort_by(|a, b| {
+        b.modified
+            .cmp(&a.modified)
+            .then_with(|| b.name.cmp(&a.name))
+    });
+    Ok(entries)
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+fn session_status(path: &Path) -> SessionStatus {
+    if path.join("notes.md").exists() {
+        SessionStatus::NotesReady
+    } else if path.join("transcript.txt").exists() {
+        SessionStatus::TranscriptReady
+    } else if path.join("recording.wav").exists() {
+        SessionStatus::RecordingOnly
+    } else {
+        SessionStatus::Empty
+    }
 }
 
 #[cfg(test)]
@@ -408,5 +481,61 @@ mod tests {
         let base = temp.path().to_path_buf();
         let result = latest_session(&base);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn create_session_dir_in_uses_configured_base_dir() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let session_dir = create_session_dir_in(temp.path(), Some("Planning")).unwrap();
+
+        assert!(session_dir.starts_with(temp.path()));
+        assert!(session_dir.exists());
+        assert!(
+            session_dir
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .contains("Planning")
+        );
+    }
+
+    #[test]
+    fn list_sessions_returns_directories_newest_first_with_status() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path();
+
+        let older = base.join("2026-05-07_100000 - Older");
+        fs::create_dir_all(&older).unwrap();
+        fs::write(older.join("recording.wav"), b"fake").unwrap();
+
+        sleep(Duration::from_millis(20));
+
+        let newer = base.join("2026-05-08_100000 - Newer");
+        fs::create_dir_all(&newer).unwrap();
+        fs::write(newer.join("recording.wav"), b"fake").unwrap();
+        fs::write(newer.join("transcript.txt"), b"transcript").unwrap();
+        fs::write(newer.join("notes.md"), b"notes").unwrap();
+
+        let sessions = list_sessions(base).unwrap();
+
+        assert_eq!(sessions.len(), 2);
+        assert_eq!(sessions[0].path, newer);
+        assert_eq!(sessions[0].status, SessionStatus::NotesReady);
+        assert_eq!(sessions[1].path, older);
+        assert_eq!(sessions[1].status, SessionStatus::RecordingOnly);
+    }
+
+    #[test]
+    fn list_sessions_includes_directories_without_recordings_as_empty() {
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path();
+        let empty = base.join("empty-session");
+        fs::create_dir_all(&empty).unwrap();
+
+        let sessions = list_sessions(base).unwrap();
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].status, SessionStatus::Empty);
     }
 }

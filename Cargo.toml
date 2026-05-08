@@ -8,6 +8,7 @@ description = "Local meeting transcription and note generation"
 default = []
 embedded-whisper = ["dep:whisper-rs"]
 auto-download-whisper-model = []
+tui = ["dep:crossterm", "dep:ratatui"]
 
 [dependencies]
 # Async runtime
@@ -31,6 +32,8 @@ whisper-rs = { version = "0.16", default-features = false, optional = true }
 clap = { version = "4", features = ["derive"] }
 dirs = "6"
 toml = "0.8"
+crossterm = { version = "0.28", optional = true }
+ratatui = { version = "0.29", optional = true }
 
 # Error handling
 anyhow = "1"

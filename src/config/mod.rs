@@ -1,17 +1,17 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 const MANAGED_MODEL_FILENAME: &str = "ggml-base.en.bin";
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 const MANAGED_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// Path to whisper.cpp executable
     #[serde(default)]
@@ -44,7 +44,7 @@ fn default_sample_rate() -> u32 {
     16000
 }
 
-fn config_dir() -> Result<PathBuf> {
+pub fn config_dir() -> Result<PathBuf> {
     Ok(dirs::config_dir()
         .context("Could not find config directory")?
         .join("scribe"))
@@ -54,13 +54,99 @@ pub fn config_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("config.toml"))
 }
 
-pub fn output_dir() -> Result<PathBuf> {
+fn default_output_dir() -> Result<PathBuf> {
     let dir = dirs::document_dir()
         .or_else(dirs::home_dir)
         .context("Could not find home directory")?
         .join("scribe");
-    std::fs::create_dir_all(&dir)?;
     Ok(dir)
+}
+
+pub fn effective_output_dir(cfg: &Config) -> Result<PathBuf> {
+    let dir = match cfg.output_dir.as_deref() {
+        Some(path) if !path.trim().is_empty() => PathBuf::from(path),
+        _ => default_output_dir()?,
+    };
+    std::fs::create_dir_all(&dir)
+        .with_context(|| format!("Failed to create output directory {}", dir.display()))?;
+    Ok(dir)
+}
+
+#[cfg(feature = "tui")]
+pub fn load_existing() -> Result<Option<Config>> {
+    let path = config_path()?;
+    if path.exists() {
+        let config_dir = path
+            .parent()
+            .context("Config path has no parent directory")?
+            .to_path_buf();
+        load_from_path(&path)
+            .map(|config| resolve_managed_whisper_model_config(config, &config_dir))
+            .map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub fn load_from_path(path: &Path) -> Result<Config> {
+    let contents = std::fs::read_to_string(path)
+        .with_context(|| format!("Failed to read {}", path.display()))?;
+    toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
+}
+
+#[cfg(feature = "tui")]
+pub fn save(cfg: &Config) -> Result<PathBuf> {
+    let path = config_path()?;
+    save_to_path(&path, cfg)?;
+    Ok(path)
+}
+
+pub fn save_to_path(path: &Path, cfg: &Config) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let toml_str = toml::to_string_pretty(cfg)?;
+    std::fs::write(path, toml_str).with_context(|| format!("Failed to write {}", path.display()))
+}
+
+#[cfg_attr(not(feature = "tui"), allow(dead_code))]
+pub fn validate_setup(cfg: &Config) -> Result<()> {
+    let key = cfg.openrouter_api_key.trim();
+    if key.is_empty() || key == "YOUR_KEY_HERE" {
+        anyhow::bail!("OpenRouter API key is required");
+    }
+
+    if cfg.model.trim().is_empty() {
+        anyhow::bail!("Notes model is required");
+    }
+
+    #[cfg(not(feature = "embedded-whisper"))]
+    {
+        if cfg
+            .whisper_bin
+            .as_deref()
+            .map(str::trim)
+            .filter(|bin| !bin.is_empty())
+            .is_none()
+        {
+            anyhow::bail!("whisper_bin is required when embedded-whisper is disabled");
+        }
+    }
+
+    let model_path = Path::new(&cfg.whisper_model);
+    if !model_path.exists() {
+        anyhow::bail!("Whisper model does not exist: {}", model_path.display());
+    }
+
+    let output = effective_output_dir(cfg)?;
+    let metadata = std::fs::metadata(&output)
+        .with_context(|| format!("Failed to inspect {}", output.display()))?;
+    if !metadata.is_dir() {
+        anyhow::bail!("Output path is not a directory: {}", output.display());
+    }
+
+    Ok(())
 }
 
 pub async fn load_or_create() -> Result<Config> {
@@ -71,16 +157,12 @@ pub async fn load_or_create() -> Result<Config> {
         .to_path_buf();
 
     let config = if path.exists() {
-        let contents = std::fs::read_to_string(&path)
-            .with_context(|| format!("Failed to read {}", path.display()))?;
-        toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))?
+        load_from_path(&path)?
     } else {
         // Create a default config for the user to fill in
         let config = default_config(&config_dir);
 
-        std::fs::create_dir_all(&config_dir)?;
-        let toml_str = toml::to_string_pretty(&config)?;
-        std::fs::write(&path, &toml_str)?;
+        save_to_path(&path, &config)?;
 
         println!("Created config at: {}", path.display());
         println!("Please edit it with your whisper model path and OpenRouter API key.");
@@ -110,7 +192,7 @@ pub async fn load_or_create() -> Result<Config> {
     }
 }
 
-fn default_config(config_dir: &Path) -> Config {
+pub fn default_config(config_dir: &Path) -> Config {
     Config {
         whisper_bin: default_whisper_bin(),
         whisper_model: default_whisper_model(config_dir),
@@ -121,12 +203,12 @@ fn default_config(config_dir: &Path) -> Config {
     }
 }
 
-#[cfg(not(feature = "auto-download-whisper-model"))]
+#[cfg(not(any(feature = "auto-download-whisper-model", feature = "tui")))]
 fn default_whisper_model(_config_dir: &Path) -> String {
     "ggml-base.en.bin".to_string()
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 fn default_whisper_model(config_dir: &Path) -> String {
     managed_model_path_in_dir(config_dir)
         .to_string_lossy()
@@ -145,18 +227,18 @@ fn default_whisper_bin() -> Option<String> {
     }
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 pub fn managed_model_filename() -> &'static str {
     MANAGED_MODEL_FILENAME
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
-fn managed_model_path_in_dir(config_dir: &Path) -> PathBuf {
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+pub fn managed_model_path_in_dir(config_dir: &Path) -> PathBuf {
     config_dir.join(managed_model_filename())
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
-fn resolve_managed_whisper_model_config(mut config: Config, config_dir: &Path) -> Config {
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+pub fn resolve_managed_whisper_model_config(mut config: Config, config_dir: &Path) -> Config {
     if config.whisper_model == managed_model_filename() {
         config.whisper_model = managed_model_path_in_dir(config_dir)
             .to_string_lossy()
@@ -170,13 +252,13 @@ fn is_managed_model_path(model_path: &str, config_dir: &Path) -> bool {
     model_path == managed_model_path_in_dir(config_dir).to_string_lossy()
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 pub async fn ensure_managed_whisper_model() -> Result<PathBuf> {
     let config_dir = config_dir()?;
     ensure_managed_whisper_model_in_dir(&config_dir, download_managed_whisper_model).await
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 async fn ensure_managed_whisper_model_in_dir<F, Fut>(
     config_dir: &Path,
     downloader: F,
@@ -212,7 +294,7 @@ where
     Ok(model_path)
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 async fn download_managed_whisper_model(download_path: PathBuf) -> Result<()> {
     println!(
         "Downloading Whisper model to {}...",
@@ -308,6 +390,112 @@ mod tests {
         assert_eq!(parsed.model, original.model);
         assert_eq!(parsed.sample_rate, original.sample_rate);
         assert_eq!(parsed.output_dir, original.output_dir);
+    }
+
+    #[test]
+    fn effective_output_dir_uses_configured_output_dir() {
+        let temp = tempfile::tempdir().unwrap();
+        let configured = temp.path().join("custom-scribe");
+        let cfg = Config {
+            whisper_bin: Some("whisper-cli".into()),
+            whisper_model: "model.bin".into(),
+            openrouter_api_key: "sk-or-test".into(),
+            model: "some/model".into(),
+            sample_rate: 16000,
+            output_dir: Some(configured.to_string_lossy().into_owned()),
+        };
+
+        let result = effective_output_dir(&cfg).unwrap();
+
+        assert_eq!(result, configured);
+        assert!(result.exists());
+    }
+
+    #[test]
+    fn validate_setup_rejects_placeholder_api_key() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_path = temp.path().join("model.bin");
+        std::fs::write(&model_path, b"model").unwrap();
+        let cfg = Config {
+            whisper_bin: Some("whisper-cli".into()),
+            whisper_model: model_path.to_string_lossy().into_owned(),
+            openrouter_api_key: "YOUR_KEY_HERE".into(),
+            model: "some/model".into(),
+            sample_rate: 16000,
+            output_dir: Some(temp.path().join("out").to_string_lossy().into_owned()),
+        };
+
+        let error = validate_setup(&cfg).unwrap_err();
+
+        assert!(error.to_string().contains("OpenRouter API key is required"));
+    }
+
+    #[test]
+    fn validate_setup_rejects_missing_whisper_model() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            whisper_bin: Some("whisper-cli".into()),
+            whisper_model: temp
+                .path()
+                .join("missing.bin")
+                .to_string_lossy()
+                .into_owned(),
+            openrouter_api_key: "sk-or-test".into(),
+            model: "some/model".into(),
+            sample_rate: 16000,
+            output_dir: Some(temp.path().join("out").to_string_lossy().into_owned()),
+        };
+
+        let error = validate_setup(&cfg).unwrap_err();
+
+        assert!(error.to_string().contains("Whisper model does not exist"));
+    }
+
+    #[test]
+    fn save_and_load_existing_config_round_trips() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("config.toml");
+        let cfg = Config {
+            whisper_bin: Some("whisper-cli".into()),
+            whisper_model: "model.bin".into(),
+            openrouter_api_key: "sk-or-test".into(),
+            model: "some/model".into(),
+            sample_rate: 22050,
+            output_dir: Some(temp.path().join("out").to_string_lossy().into_owned()),
+        };
+
+        save_to_path(&path, &cfg).unwrap();
+        let loaded = load_from_path(&path).unwrap();
+
+        assert_eq!(loaded.whisper_bin, cfg.whisper_bin);
+        assert_eq!(loaded.whisper_model, cfg.whisper_model);
+        assert_eq!(loaded.openrouter_api_key, cfg.openrouter_api_key);
+        assert_eq!(loaded.model, cfg.model);
+        assert_eq!(loaded.sample_rate, cfg.sample_rate);
+        assert_eq!(loaded.output_dir, cfg.output_dir);
+    }
+
+    #[cfg(feature = "tui")]
+    #[test]
+    fn tui_setup_accepts_managed_model_filename_next_to_config() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join("ggml-base.en.bin"), b"model").unwrap();
+        let cfg = Config {
+            whisper_bin: Some("whisper-cli".into()),
+            whisper_model: "ggml-base.en.bin".into(),
+            openrouter_api_key: "sk-or-test".into(),
+            model: "some/model".into(),
+            sample_rate: 16000,
+            output_dir: Some(temp.path().join("out").to_string_lossy().into_owned()),
+        };
+
+        let cfg = resolve_managed_whisper_model_config(cfg, temp.path());
+
+        validate_setup(&cfg).unwrap();
+        assert_eq!(
+            cfg.whisper_model,
+            temp.path().join("ggml-base.en.bin").to_string_lossy()
+        );
     }
 
     #[cfg(feature = "auto-download-whisper-model")]
