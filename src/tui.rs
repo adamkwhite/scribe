@@ -58,7 +58,7 @@ struct RecordingState {
     session_name: String,
     started_at: Instant,
     recording_flag: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<Result<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -73,6 +73,7 @@ enum ProcessingStep {
 #[derive(Debug)]
 enum ProcessingEvent {
     Step(ProcessingStep),
+    RecordingStatus(String),
     Complete,
     Error(String),
 }
@@ -85,6 +86,7 @@ struct App {
     selected_session: usize,
     recording_name: String,
     recording: Option<RecordingState>,
+    recording_messages: Vec<String>,
     processing_session: Option<PathBuf>,
     processing_step: ProcessingStep,
     processing_rx: Option<mpsc::UnboundedReceiver<ProcessingEvent>>,
@@ -239,6 +241,7 @@ impl App {
             selected_session: 0,
             recording_name: String::new(),
             recording: None,
+            recording_messages: Vec::new(),
             processing_session: None,
             processing_step: ProcessingStep::Finalizing,
             processing_rx: None,
@@ -271,10 +274,15 @@ impl App {
 
     async fn download_model(&mut self) {
         self.setup.message = "Downloading model...".to_string();
-        match config::ensure_managed_whisper_model().await {
+        let mut last_message = self.setup.message.clone();
+        match config::ensure_managed_whisper_model_with_events(|event| {
+            last_message = event.message();
+        })
+        .await
+        {
             Ok(path) => {
                 self.setup.whisper_model = path.to_string_lossy().into_owned();
-                self.setup.message = "Model downloaded.".to_string();
+                self.setup.message = last_message;
             }
             Err(error) => self.setup.message = error.to_string(),
         }
@@ -344,15 +352,22 @@ impl App {
         let recording_for_task = recording.clone();
         let sample_rate = cfg.sample_rate;
         let session_for_task = session_dir.clone();
+        let (tx, rx) = mpsc::unbounded_channel();
+        let tx_for_task = tx.clone();
 
         let task = tokio::task::spawn_blocking(move || {
-            if let Err(error) =
-                audio::record_loopback(recording_for_task, sample_rate, session_for_task)
-            {
-                eprintln!("Recording error: {error}");
-            }
+            audio::record_loopback_with_events(
+                recording_for_task,
+                sample_rate,
+                session_for_task,
+                move |event| {
+                    let _ = tx_for_task.send(ProcessingEvent::RecordingStatus(event.message()));
+                },
+            )
         });
 
+        self.recording_messages.clear();
+        self.processing_rx = Some(rx);
         self.recording = Some(RecordingState {
             session_name: session_dir
                 .file_name()
@@ -398,6 +413,14 @@ impl App {
         for event in events {
             match event {
                 ProcessingEvent::Step(step) => self.processing_step = step,
+                ProcessingEvent::RecordingStatus(message) => {
+                    self.recording_messages.push(message);
+                    const MAX_RECORDING_MESSAGES: usize = 6;
+                    if self.recording_messages.len() > MAX_RECORDING_MESSAGES {
+                        self.recording_messages
+                            .drain(0..self.recording_messages.len() - MAX_RECORDING_MESSAGES);
+                    }
+                }
                 ProcessingEvent::Complete => {
                     self.processing_step = ProcessingStep::Complete;
                     self.processing_rx = None;
@@ -422,11 +445,18 @@ fn spawn_processing_task(
 ) {
     tokio::spawn(async move {
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::Finalizing));
-        if let Err(error) = recording.task.await {
-            let _ = tx.send(ProcessingEvent::Error(format!(
-                "Recording task failed to join: {error}"
-            )));
-            return;
+        match recording.task.await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                let _ = tx.send(ProcessingEvent::Error(error.to_string()));
+                return;
+            }
+            Err(error) => {
+                let _ = tx.send(ProcessingEvent::Error(format!(
+                    "Recording task failed to join: {error}"
+                )));
+                return;
+            }
         }
 
         let session_dir = recording.session_dir;
@@ -743,23 +773,31 @@ fn render_recording(frame: &mut Frame<'_>, app: &App) {
         .map(|state| state.session_dir.to_string_lossy().into_owned())
         .unwrap_or_default();
 
+    let mut lines = vec![
+        Line::from("* Recording"),
+        Line::from(""),
+        Line::from(format!("Session      {session}")),
+        Line::from(format!("Elapsed      {elapsed}")),
+        Line::from(format!("Destination  {destination}")),
+        Line::from("Audio file   recording.wav"),
+        Line::from(""),
+        Line::from("Audio status"),
+    ];
+    if app.recording_messages.is_empty() {
+        lines.push(Line::from("Waiting for audio device details..."));
+    } else {
+        lines.extend(app.recording_messages.iter().cloned().map(Line::from));
+    }
+    lines.extend([Line::from(""), Line::from("[ Enter ] Stop & Process")]);
+
     frame.render_widget(
-        Paragraph::new(vec![
-            Line::from("* Recording"),
-            Line::from(""),
-            Line::from(format!("Session      {session}")),
-            Line::from(format!("Elapsed      {elapsed}")),
-            Line::from(format!("Destination  {destination}")),
-            Line::from("Audio file   recording.wav"),
-            Line::from(""),
-            Line::from("[ Enter ] Stop & Process"),
-        ])
-        .block(
-            Block::default()
-                .title(" Scribe Recording ")
-                .borders(Borders::ALL),
-        )
-        .wrap(Wrap { trim: true }),
+        Paragraph::new(lines)
+            .block(
+                Block::default()
+                    .title(" Scribe Recording ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: true }),
         area,
     );
 }
@@ -967,6 +1005,7 @@ mod tests {
             selected_session: 0,
             recording_name: "Standup".to_string(),
             recording: None,
+            recording_messages: Vec::new(),
             processing_session: None,
             processing_step: ProcessingStep::Finalizing,
             processing_rx: None,
@@ -990,6 +1029,7 @@ mod tests {
             selected_session: 0,
             recording_name: String::new(),
             recording: None,
+            recording_messages: Vec::new(),
             processing_session: None,
             processing_step: ProcessingStep::Finalizing,
             processing_rx: Some(rx),
@@ -1002,6 +1042,33 @@ mod tests {
         assert_eq!(app.screen, Screen::Complete);
         assert_eq!(app.processing_step, ProcessingStep::Complete);
         assert!(app.processing_rx.is_none());
+    }
+
+    #[test]
+    fn recording_status_event_updates_visible_messages() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut app = App {
+            screen: Screen::Recording,
+            cfg: None,
+            setup: SetupForm::from_config(None),
+            sessions: Vec::new(),
+            selected_session: 0,
+            recording_name: String::new(),
+            recording: None,
+            recording_messages: Vec::new(),
+            processing_session: None,
+            processing_step: ProcessingStep::Finalizing,
+            processing_rx: Some(rx),
+            message: String::new(),
+        };
+
+        tx.send(ProcessingEvent::RecordingStatus(
+            "Loopback: HD Pro Webcam C920".to_string(),
+        ))
+        .unwrap();
+        app.drain_processing_events();
+
+        assert_eq!(app.recording_messages, vec!["Loopback: HD Pro Webcam C920"]);
     }
 
     fn tokio_test_handle_key(app: &mut App, code: KeyCode) -> Result<bool> {

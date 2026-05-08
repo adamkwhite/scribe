@@ -11,6 +11,29 @@ const MANAGED_MODEL_FILENAME: &str = "ggml-base.en.bin";
 const MANAGED_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ModelDownloadEvent {
+    AlreadyPresent(PathBuf),
+    Downloading(PathBuf),
+    Downloaded(PathBuf),
+}
+
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+impl ModelDownloadEvent {
+    pub fn message(&self) -> String {
+        match self {
+            Self::AlreadyPresent(path) => {
+                format!("Whisper model already present: {}", path.display())
+            }
+            Self::Downloading(path) => {
+                format!("Downloading Whisper model to {}...", path.display())
+            }
+            Self::Downloaded(path) => format!("Whisper model downloaded to {}", path.display()),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Config {
     /// Path to whisper.cpp executable
@@ -252,13 +275,31 @@ fn is_managed_model_path(model_path: &str, config_dir: &Path) -> bool {
     model_path == managed_model_path_in_dir(config_dir).to_string_lossy()
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+#[cfg(feature = "auto-download-whisper-model")]
 pub async fn ensure_managed_whisper_model() -> Result<PathBuf> {
-    let config_dir = config_dir()?;
-    ensure_managed_whisper_model_in_dir(&config_dir, download_managed_whisper_model).await
+    ensure_managed_whisper_model_with_events(|event| {
+        if matches!(event, ModelDownloadEvent::Downloading(_)) {
+            println!("{}", event.message());
+        }
+    })
+    .await
 }
 
 #[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+pub async fn ensure_managed_whisper_model_with_events<F>(on_event: F) -> Result<PathBuf>
+where
+    F: FnMut(ModelDownloadEvent),
+{
+    let config_dir = config_dir()?;
+    ensure_managed_whisper_model_in_dir_with_events(
+        &config_dir,
+        download_managed_whisper_model,
+        on_event,
+    )
+    .await
+}
+
+#[cfg(feature = "auto-download-whisper-model")]
 async fn ensure_managed_whisper_model_in_dir<F, Fut>(
     config_dir: &Path,
     downloader: F,
@@ -267,8 +308,23 @@ where
     F: FnOnce(PathBuf) -> Fut,
     Fut: Future<Output = Result<()>>,
 {
+    ensure_managed_whisper_model_in_dir_with_events(config_dir, downloader, |_| {}).await
+}
+
+#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+async fn ensure_managed_whisper_model_in_dir_with_events<F, Fut, R>(
+    config_dir: &Path,
+    downloader: F,
+    mut on_event: R,
+) -> Result<PathBuf>
+where
+    F: FnOnce(PathBuf) -> Fut,
+    Fut: Future<Output = Result<()>>,
+    R: FnMut(ModelDownloadEvent),
+{
     let model_path = managed_model_path_in_dir(config_dir);
     if model_path.exists() {
+        on_event(ModelDownloadEvent::AlreadyPresent(model_path.clone()));
         return Ok(model_path);
     }
 
@@ -277,6 +333,7 @@ where
 
     let download_path = model_path.with_extension("bin.download");
     let _ = std::fs::remove_file(&download_path);
+    on_event(ModelDownloadEvent::Downloading(model_path.clone()));
 
     if let Err(error) = downloader(download_path.clone()).await {
         let _ = std::fs::remove_file(&download_path);
@@ -291,15 +348,12 @@ where
         )
     })?;
 
+    on_event(ModelDownloadEvent::Downloaded(model_path.clone()));
     Ok(model_path)
 }
 
 #[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 async fn download_managed_whisper_model(download_path: PathBuf) -> Result<()> {
-    println!(
-        "Downloading Whisper model to {}...",
-        download_path.display()
-    );
     let response = reqwest::get(MANAGED_MODEL_URL)
         .await
         .context("Failed to start Whisper model download")?
@@ -495,6 +549,25 @@ mod tests {
         assert_eq!(
             cfg.whisper_model,
             temp.path().join("ggml-base.en.bin").to_string_lossy()
+        );
+    }
+
+    #[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
+    #[test]
+    fn model_download_events_format_user_visible_messages() {
+        let path = PathBuf::from("/tmp/scribe/ggml-base.en.bin");
+
+        assert_eq!(
+            ModelDownloadEvent::AlreadyPresent(path.clone()).message(),
+            format!("Whisper model already present: {}", path.display())
+        );
+        assert_eq!(
+            ModelDownloadEvent::Downloading(path.clone()).message(),
+            format!("Downloading Whisper model to {}...", path.display())
+        );
+        assert_eq!(
+            ModelDownloadEvent::Downloaded(path.clone()).message(),
+            format!("Whisper model downloaded to {}", path.display())
         );
     }
 

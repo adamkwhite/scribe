@@ -27,6 +27,51 @@ pub struct SessionEntry {
     pub modified: SystemTime,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum AudioRecordingEvent {
+    LoopbackDevice(String),
+    MicDevice(String),
+    AudioConfig {
+        loopback_sample_rate: u32,
+        loopback_channels: u16,
+        mic_sample_rate: u32,
+        mic_channels: u16,
+        output_sample_rate: u32,
+    },
+    StreamError {
+        source: &'static str,
+        error: String,
+    },
+    SavedRecording(PathBuf),
+}
+
+impl AudioRecordingEvent {
+    pub fn message(&self) -> String {
+        match self {
+            Self::LoopbackDevice(name) => format!("Loopback: {name}"),
+            Self::MicDevice(name) => format!("Mic: {name}"),
+            Self::AudioConfig {
+                loopback_sample_rate,
+                loopback_channels,
+                mic_sample_rate,
+                mic_channels,
+                output_sample_rate,
+            } => format!(
+                "Loopback: {loopback_sample_rate}Hz {loopback_channels}ch, Mic: {mic_sample_rate}Hz {mic_channels}ch, Output: {output_sample_rate}Hz mono"
+            ),
+            Self::StreamError { source, error } => format!("{source} stream error: {error}"),
+            Self::SavedRecording(path) => format!("Saved recording to: {}", path.display()),
+        }
+    }
+
+    fn print(&self) {
+        match self {
+            Self::StreamError { .. } => eprintln!("{}", self.message()),
+            _ => println!("{}", self.message()),
+        }
+    }
+}
+
 /// Shared buffer for mixing two audio streams.
 /// Each stream pushes mono f32 samples; the writer drains and mixes them.
 struct MixBuffer {
@@ -78,9 +123,25 @@ fn i16_to_mono_f32(data: &[i16], channels: u16) -> Vec<f32> {
 /// Saves to `session_dir/recording.wav`.
 pub fn record_loopback(
     recording: Arc<AtomicBool>,
-    _target_sample_rate: u32,
+    target_sample_rate: u32,
     session_dir: PathBuf,
 ) -> Result<()> {
+    record_loopback_with_events(recording, target_sample_rate, session_dir, |event| {
+        event.print();
+    })
+}
+
+pub fn record_loopback_with_events<F>(
+    recording: Arc<AtomicBool>,
+    _target_sample_rate: u32,
+    session_dir: PathBuf,
+    on_event: F,
+) -> Result<()>
+where
+    F: Fn(AudioRecordingEvent) + Send + Sync + 'static,
+{
+    let on_event = Arc::new(on_event);
+
     #[cfg(target_os = "windows")]
     let host = cpal::host_from_id(cpal::HostId::Wasapi).context("WASAPI host not available")?;
 
@@ -103,8 +164,12 @@ pub fn record_loopback(
         .default_input_device()
         .context("No default input (mic) device found")?;
 
-    println!("Loopback: {}", loopback_device.name().unwrap_or_default());
-    println!("Mic: {}", mic_device.name().unwrap_or_default());
+    on_event(AudioRecordingEvent::LoopbackDevice(
+        loopback_device.name().unwrap_or_default(),
+    ));
+    on_event(AudioRecordingEvent::MicDevice(
+        mic_device.name().unwrap_or_default(),
+    ));
 
     let loopback_config = loopback_device
         .default_output_config()
@@ -118,14 +183,13 @@ pub fn record_loopback(
     // Use the loopback sample rate for the output WAV (mic will be at its native rate,
     // but since both are typically 48kHz or 44.1kHz on Windows this usually matches)
     let output_sample_rate = loopback_config.sample_rate().0;
-    println!(
-        "Loopback: {}Hz {}ch, Mic: {}Hz {}ch, Output: {}Hz mono",
-        loopback_config.sample_rate().0,
-        loopback_config.channels(),
-        mic_config.sample_rate().0,
-        mic_config.channels(),
+    on_event(AudioRecordingEvent::AudioConfig {
+        loopback_sample_rate: loopback_config.sample_rate().0,
+        loopback_channels: loopback_config.channels(),
+        mic_sample_rate: mic_config.sample_rate().0,
+        mic_channels: mic_config.channels(),
         output_sample_rate,
-    );
+    });
 
     let spec = WavSpec {
         channels: 1, // mono mix
@@ -147,6 +211,8 @@ pub fn record_loopback(
     let mix_lb = mix.clone();
     let rec_lb = recording.clone();
     let lb_channels = loopback_config.channels();
+    let report_lb_f32 = on_event.clone();
+    let report_lb_i16 = on_event.clone();
 
     let loopback_stream = match loopback_config.sample_format() {
         cpal::SampleFormat::F32 => loopback_device.build_input_stream(
@@ -160,7 +226,12 @@ pub fn record_loopback(
                     m.loopback.extend(mono);
                 }
             },
-            |err| eprintln!("Loopback stream error: {err}"),
+            move |err| {
+                report_lb_f32(AudioRecordingEvent::StreamError {
+                    source: "Loopback",
+                    error: err.to_string(),
+                })
+            },
             None,
         )?,
         cpal::SampleFormat::I16 => loopback_device.build_input_stream(
@@ -174,7 +245,12 @@ pub fn record_loopback(
                     m.loopback.extend(mono);
                 }
             },
-            |err| eprintln!("Loopback stream error: {err}"),
+            move |err| {
+                report_lb_i16(AudioRecordingEvent::StreamError {
+                    source: "Loopback",
+                    error: err.to_string(),
+                })
+            },
             None,
         )?,
         format => anyhow::bail!("Unsupported loopback sample format: {format:?}"),
@@ -184,6 +260,8 @@ pub fn record_loopback(
     let mix_mic = mix.clone();
     let rec_mic = recording.clone();
     let mic_channels = mic_config.channels();
+    let report_mic_f32 = on_event.clone();
+    let report_mic_i16 = on_event.clone();
 
     let mic_stream = match mic_config.sample_format() {
         cpal::SampleFormat::F32 => mic_device.build_input_stream(
@@ -197,7 +275,12 @@ pub fn record_loopback(
                     m.mic.extend(mono);
                 }
             },
-            |err| eprintln!("Mic stream error: {err}"),
+            move |err| {
+                report_mic_f32(AudioRecordingEvent::StreamError {
+                    source: "Mic",
+                    error: err.to_string(),
+                })
+            },
             None,
         )?,
         cpal::SampleFormat::I16 => mic_device.build_input_stream(
@@ -211,7 +294,12 @@ pub fn record_loopback(
                     m.mic.extend(mono);
                 }
             },
-            |err| eprintln!("Mic stream error: {err}"),
+            move |err| {
+                report_mic_i16(AudioRecordingEvent::StreamError {
+                    source: "Mic",
+                    error: err.to_string(),
+                })
+            },
             None,
         )?,
         format => anyhow::bail!("Unsupported mic sample format: {format:?}"),
@@ -265,7 +353,7 @@ pub fn record_loopback(
         w.finalize().context("Failed to finalize WAV")?;
     }
 
-    println!("Saved recording to: {}", wav_path.display());
+    on_event(AudioRecordingEvent::SavedRecording(wav_path));
     Ok(())
 }
 
@@ -537,5 +625,42 @@ mod tests {
 
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].status, SessionStatus::Empty);
+    }
+
+    #[test]
+    fn audio_recording_events_format_user_visible_messages() {
+        let saved_path = PathBuf::from("/tmp/scribe/recording.wav");
+
+        assert_eq!(
+            AudioRecordingEvent::LoopbackDevice("HD Pro Webcam C920".into()).message(),
+            "Loopback: HD Pro Webcam C920"
+        );
+        assert_eq!(
+            AudioRecordingEvent::MicDevice("Studio Mic".into()).message(),
+            "Mic: Studio Mic"
+        );
+        assert_eq!(
+            AudioRecordingEvent::AudioConfig {
+                loopback_sample_rate: 16000,
+                loopback_channels: 2,
+                mic_sample_rate: 48000,
+                mic_channels: 1,
+                output_sample_rate: 16000,
+            }
+            .message(),
+            "Loopback: 16000Hz 2ch, Mic: 48000Hz 1ch, Output: 16000Hz mono"
+        );
+        assert_eq!(
+            AudioRecordingEvent::SavedRecording(saved_path.clone()).message(),
+            format!("Saved recording to: {}", saved_path.display())
+        );
+        assert_eq!(
+            AudioRecordingEvent::StreamError {
+                source: "Mic",
+                error: "device lost".into(),
+            }
+            .message(),
+            "Mic stream error: device lost"
+        );
     }
 }
