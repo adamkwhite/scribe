@@ -7,6 +7,7 @@ description = "Local meeting transcription and note generation"
 [features]
 default = []
 embedded-whisper = ["dep:whisper-rs"]
+auto-download-whisper-model = []
 
 [dependencies]
 # Async runtime

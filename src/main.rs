@@ -22,7 +22,7 @@ struct Args {
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
-    let cfg = config::load_or_create()?;
+    let cfg = config::load_or_create().await?;
 
     if args.cli {
         run_cli(cfg).await

@@ -36,6 +36,19 @@ whisper_model = "C:/path/to/ggml-base.en.bin"
 openrouter_api_key = "sk-or-..."
 ```
 
+### Automatic model download
+
+The optional `auto-download-whisper-model` feature manages `ggml-base.en.bin`
+under the same directory as the application config:
+
+```sh
+cargo build --release --features auto-download-whisper-model
+```
+
+When enabled, Scribe downloads the model on first startup if it is missing from
+the config directory. Later runs reuse the existing file without re-downloading
+or validating it.
+
 ## Usage
 
 ```
