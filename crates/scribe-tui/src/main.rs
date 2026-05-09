@@ -18,6 +18,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 
+mod playback;
+mod session_store;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     run().await
@@ -27,6 +30,9 @@ async fn main() -> Result<()> {
 enum Screen {
     Setup,
     Sessions,
+    SessionDetail,
+    TextViewer,
+    Playback,
     NewRecording,
     Recording,
     Processing,
@@ -83,6 +89,69 @@ enum ProcessingEvent {
     Error(String),
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DetailAction {
+    Notes,
+    Transcript,
+    Playback,
+    OpenFolder,
+    Archive,
+    Delete,
+}
+
+const DETAIL_ACTIONS: [DetailAction; 6] = [
+    DetailAction::Notes,
+    DetailAction::Transcript,
+    DetailAction::Playback,
+    DetailAction::OpenFolder,
+    DetailAction::Archive,
+    DetailAction::Delete,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PendingSessionAction {
+    Archive,
+    Delete,
+}
+
+struct TextViewerState {
+    title: String,
+    path: PathBuf,
+    lines: Vec<String>,
+    scroll: usize,
+}
+
+impl TextViewerState {
+    fn new(title: impl Into<String>, path: PathBuf, lines: Vec<String>) -> Self {
+        Self {
+            title: title.into(),
+            path,
+            lines,
+            scroll: 0,
+        }
+    }
+
+    fn scroll_up(&mut self, amount: usize) {
+        self.scroll = self.scroll.saturating_sub(amount);
+    }
+
+    fn scroll_down(&mut self, amount: usize) {
+        self.scroll = (self.scroll + amount).min(self.max_scroll());
+    }
+
+    fn scroll_to_top(&mut self) {
+        self.scroll = 0;
+    }
+
+    fn scroll_to_bottom(&mut self) {
+        self.scroll = self.max_scroll();
+    }
+
+    fn max_scroll(&self) -> usize {
+        self.lines.len().saturating_sub(1)
+    }
+}
+
 struct App {
     screen: Screen,
     cfg: Option<config::Config>,
@@ -97,6 +166,11 @@ struct App {
     processing_step: ProcessingStep,
     processing_rx: Option<mpsc::UnboundedReceiver<ProcessingEvent>>,
     message: String,
+    selected_detail_action: usize,
+    detail_session: Option<audio::SessionEntry>,
+    text_viewer: Option<TextViewerState>,
+    playback: Option<playback::PlaybackViewState>,
+    pending_session_action: Option<PendingSessionAction>,
 }
 
 pub async fn run() -> Result<()> {
@@ -146,6 +220,9 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     match app.screen {
         Screen::Setup => handle_setup_key(app, key).await,
         Screen::Sessions => handle_sessions_key(app, key),
+        Screen::SessionDetail => handle_session_detail_key(app, key),
+        Screen::TextViewer => handle_text_viewer_key(app, key),
+        Screen::Playback => handle_playback_key(app, key),
         Screen::NewRecording => handle_new_recording_key(app, key).await,
         Screen::Recording => handle_recording_key(app, key).await,
         Screen::Processing => Ok(false),
@@ -182,7 +259,7 @@ fn handle_sessions_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('q') | KeyCode::Esc => return Ok(true),
         KeyCode::Up => app.select_previous_session(),
         KeyCode::Down => app.select_next_session(),
-        KeyCode::Enter | KeyCode::Char('o') => app.open_selected_session()?,
+        KeyCode::Enter | KeyCode::Char('o') => app.open_selected_session_detail(),
         KeyCode::Char('r') => {
             app.recording_name.clear();
             app.screen = Screen::NewRecording;
@@ -192,6 +269,73 @@ fn handle_sessions_key(app: &mut App, key: KeyEvent) -> Result<bool> {
             app.screen = Screen::Setup;
         }
         KeyCode::Char('f') => app.reload_sessions(),
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_session_detail_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if app.pending_session_action.is_some() {
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Enter => app.confirm_pending_session_action()?,
+            KeyCode::Char('n') | KeyCode::Esc => app.cancel_pending_session_action(),
+            KeyCode::Char('q') => return Ok(true),
+            _ => {}
+        }
+        return Ok(false);
+    }
+
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('b') => {
+            app.stop_playback();
+            app.screen = Screen::Sessions;
+        }
+        KeyCode::Up => app.select_previous_detail_action(),
+        KeyCode::Down => app.select_next_detail_action(),
+        KeyCode::Enter => app.activate_detail_action()?,
+        KeyCode::Char('o') => app.open_detail_session_folder()?,
+        KeyCode::Char('n') => app.open_text_artifact("notes.md", "Notes")?,
+        KeyCode::Char('t') => app.open_text_artifact("transcript.txt", "Transcript")?,
+        KeyCode::Char('p') => app.open_playback_view(),
+        KeyCode::Char('a') => app.request_session_action(PendingSessionAction::Archive),
+        KeyCode::Char('d') => app.request_session_action(PendingSessionAction::Delete),
+        KeyCode::Char('q') => return Ok(true),
+        _ => {}
+    }
+    Ok(false)
+}
+
+fn handle_text_viewer_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    if let Some(viewer) = &mut app.text_viewer {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('b') => app.screen = Screen::SessionDetail,
+            KeyCode::Up | KeyCode::Char('k') => viewer.scroll_up(1),
+            KeyCode::Down | KeyCode::Char('j') => viewer.scroll_down(1),
+            KeyCode::PageUp => viewer.scroll_up(10),
+            KeyCode::PageDown => viewer.scroll_down(10),
+            KeyCode::Home | KeyCode::Char('g') => viewer.scroll_to_top(),
+            KeyCode::End | KeyCode::Char('G') => viewer.scroll_to_bottom(),
+            KeyCode::Char('q') => return Ok(true),
+            _ => {}
+        }
+    } else {
+        app.screen = Screen::SessionDetail;
+    }
+    Ok(false)
+}
+
+fn handle_playback_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc | KeyCode::Char('b') => {
+            app.stop_playback();
+            app.screen = Screen::SessionDetail;
+        }
+        KeyCode::Char(' ') => app.toggle_playback(),
+        KeyCode::Char('r') => app.restart_playback(),
+        KeyCode::Left | KeyCode::Char('h') => app.rewind_playback(),
+        KeyCode::Right | KeyCode::Char('l') => app.fast_forward_playback(),
+        KeyCode::Char('s') => app.stop_playback(),
+        KeyCode::Char('q') => return Ok(true),
         _ => {}
     }
     Ok(false)
@@ -244,6 +388,7 @@ fn handle_error_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 
 impl App {
     fn load(log_path: Option<PathBuf>) -> Result<Self> {
+        cleanup_archive_on_startup();
         let cfg = config::load_existing()?;
         let setup = SetupForm::from_config(cfg.as_ref());
         let mut app = Self {
@@ -260,6 +405,11 @@ impl App {
             processing_step: ProcessingStep::Finalizing,
             processing_rx: None,
             message: String::new(),
+            selected_detail_action: 0,
+            detail_session: None,
+            text_viewer: None,
+            playback: None,
+            pending_session_action: None,
         };
 
         if app
@@ -353,11 +503,216 @@ impl App {
         }
     }
 
-    fn open_selected_session(&mut self) -> Result<()> {
+    fn open_selected_session_detail(&mut self) {
         if let Some(session) = self.sessions.get(self.selected_session) {
+            tracing::info!(session_dir = %session.path.display(), "TUI opening session detail");
+            self.detail_session = Some(session.clone());
+            self.selected_detail_action = 0;
+            self.message.clear();
+            self.screen = Screen::SessionDetail;
+        }
+    }
+
+    fn select_previous_detail_action(&mut self) {
+        self.selected_detail_action = self.selected_detail_action.saturating_sub(1);
+    }
+
+    fn select_next_detail_action(&mut self) {
+        if self.selected_detail_action + 1 < DETAIL_ACTIONS.len() {
+            self.selected_detail_action += 1;
+        }
+    }
+
+    fn activate_detail_action(&mut self) -> Result<()> {
+        match DETAIL_ACTIONS[self.selected_detail_action] {
+            DetailAction::Notes => self.open_text_artifact("notes.md", "Notes")?,
+            DetailAction::Transcript => self.open_text_artifact("transcript.txt", "Transcript")?,
+            DetailAction::Playback => self.open_playback_view(),
+            DetailAction::OpenFolder => self.open_detail_session_folder()?,
+            DetailAction::Archive => self.request_session_action(PendingSessionAction::Archive),
+            DetailAction::Delete => self.request_session_action(PendingSessionAction::Delete),
+        }
+        Ok(())
+    }
+
+    fn detail_session(&self) -> Option<&audio::SessionEntry> {
+        self.detail_session.as_ref()
+    }
+
+    fn open_detail_session_folder(&mut self) -> Result<()> {
+        if let Some(session) = self.detail_session() {
             tracing::info!(session_dir = %session.path.display(), "TUI opening session folder");
             opener::open_folder(&session.path)?;
         }
+        Ok(())
+    }
+
+    fn open_text_artifact(&mut self, filename: &str, title: &str) -> Result<()> {
+        let Some(session) = self.detail_session() else {
+            return Ok(());
+        };
+        let path = session.path.join(filename);
+        if !path.exists() {
+            self.message = format!("{filename} is not available for this session.");
+            return Ok(());
+        }
+
+        let contents = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        let lines = contents
+            .lines()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        self.text_viewer = Some(TextViewerState::new(title, path, lines));
+        self.message.clear();
+        self.screen = Screen::TextViewer;
+        Ok(())
+    }
+
+    fn open_playback_view(&mut self) {
+        let Some(session) = self.detail_session() else {
+            return;
+        };
+        let path = session.path.join("recording.wav");
+        if !path.exists() {
+            self.message = "recording.wav is not available for this session.".to_string();
+            return;
+        }
+
+        let session_name = session.name.clone();
+        self.stop_playback();
+        self.playback = Some(playback::PlaybackViewState::open(
+            session_name,
+            path.clone(),
+        ));
+        tracing::info!(recording_path = %path.display(), "TUI opening playback view");
+        self.message.clear();
+        self.screen = Screen::Playback;
+    }
+
+    fn toggle_playback(&mut self) {
+        if let Some(playback) = &mut self.playback
+            && let Some(controller) = playback.controller.as_mut()
+        {
+            match controller.toggle_play_pause() {
+                Ok(()) => {
+                    playback.status = if controller.is_paused() {
+                        "Paused".to_string()
+                    } else {
+                        "Playing".to_string()
+                    };
+                }
+                Err(error) => playback.error = Some(error.to_string()),
+            }
+        }
+    }
+
+    fn restart_playback(&mut self) {
+        if let Some(playback) = &mut self.playback
+            && let Some(controller) = playback.controller.as_mut()
+        {
+            match controller.restart() {
+                Ok(()) => playback.status = "Playing from start".to_string(),
+                Err(error) => playback.error = Some(error.to_string()),
+            }
+        }
+    }
+
+    fn rewind_playback(&mut self) {
+        if let Some(playback) = &mut self.playback
+            && let Some(controller) = playback.controller.as_mut()
+        {
+            match controller.rewind(Duration::from_secs(10)) {
+                Ok(()) => playback.status = "Rewound 10 seconds".to_string(),
+                Err(error) => playback.error = Some(error.to_string()),
+            }
+        }
+    }
+
+    fn fast_forward_playback(&mut self) {
+        if let Some(playback) = &mut self.playback
+            && let Some(controller) = playback.controller.as_mut()
+        {
+            match controller.fast_forward(Duration::from_secs(30)) {
+                Ok(()) => playback.status = "Fast-forwarded 30 seconds".to_string(),
+                Err(error) => playback.error = Some(error.to_string()),
+            }
+        }
+    }
+
+    fn stop_playback(&mut self) {
+        if let Some(playback) = &mut self.playback {
+            playback.stop();
+        }
+    }
+
+    fn request_session_action(&mut self, action: PendingSessionAction) {
+        self.pending_session_action = Some(action);
+        self.message = match action {
+            PendingSessionAction::Archive => {
+                "Archive this session? Press y to confirm or n/Esc to cancel.".to_string()
+            }
+            PendingSessionAction::Delete => {
+                "Delete this session permanently? Press y to confirm or n/Esc to cancel."
+                    .to_string()
+            }
+        };
+    }
+
+    fn cancel_pending_session_action(&mut self) {
+        self.pending_session_action = None;
+        self.message = "Cancelled.".to_string();
+    }
+
+    fn confirm_pending_session_action(&mut self) -> Result<()> {
+        let Some(action) = self.pending_session_action.take() else {
+            return Ok(());
+        };
+        match action {
+            PendingSessionAction::Archive => self.archive_detail_session(),
+            PendingSessionAction::Delete => self.delete_detail_session(),
+        }
+    }
+
+    fn archive_detail_session(&mut self) -> Result<()> {
+        let config_dir = config::config_dir()?;
+        let archive_root = session_store::archive_dir(&config_dir);
+        self.archive_detail_session_to(&archive_root)
+    }
+
+    fn archive_detail_session_to(&mut self, archive_root: &std::path::Path) -> Result<()> {
+        let Some(session) = self.detail_session.clone() else {
+            return Ok(());
+        };
+        self.stop_playback();
+        let archived_path = session_store::archive_session(&session.path, archive_root)?;
+        tracing::info!(
+            session_dir = %session.path.display(),
+            archive_dir = %archived_path.display(),
+            "TUI archived session"
+        );
+        self.detail_session = None;
+        self.text_viewer = None;
+        self.playback = None;
+        self.reload_sessions();
+        self.message = format!("Archived session to {}", archived_path.display());
+        self.screen = Screen::Sessions;
+        Ok(())
+    }
+
+    fn delete_detail_session(&mut self) -> Result<()> {
+        let Some(session) = self.detail_session.clone() else {
+            return Ok(());
+        };
+        self.stop_playback();
+        session_store::delete_session(&session.path)?;
+        tracing::info!(session_dir = %session.path.display(), "TUI deleted session");
+        self.detail_session = None;
+        self.text_viewer = None;
+        self.playback = None;
+        self.reload_sessions();
+        self.message = format!("Deleted session {}", session.name);
+        self.screen = Screen::Sessions;
         Ok(())
     }
 
@@ -574,6 +929,35 @@ fn spawn_processing_task(
     });
 }
 
+fn cleanup_archive_on_startup() {
+    match config::config_dir() {
+        Ok(config_dir) => {
+            let archive_root = session_store::archive_dir(&config_dir);
+            match session_store::cleanup_archive(
+                &archive_root,
+                Duration::from_secs(7 * 24 * 60 * 60),
+                SystemTime::now(),
+            ) {
+                Ok(removed) => {
+                    tracing::info!(
+                        archive_dir = %archive_root.display(),
+                        removed,
+                        "TUI archive cleanup completed"
+                    );
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        archive_dir = %archive_root.display(),
+                        error = %error,
+                        "TUI archive cleanup failed"
+                    );
+                }
+            }
+        }
+        Err(error) => tracing::warn!(error = %error, "TUI archive cleanup skipped"),
+    }
+}
+
 impl SetupForm {
     fn from_config(cfg: Option<&config::Config>) -> Self {
         let default_cfg = config::config_dir()
@@ -700,6 +1084,9 @@ fn render(frame: &mut Frame<'_>, app: &App) {
     match app.screen {
         Screen::Setup => render_setup(frame, app),
         Screen::Sessions => render_sessions(frame, app),
+        Screen::SessionDetail => render_session_detail(frame, app),
+        Screen::TextViewer => render_text_viewer(frame, app),
+        Screen::Playback => render_playback(frame, app),
         Screen::NewRecording => {
             render_sessions(frame, app);
             render_new_recording(frame, app);
@@ -825,10 +1212,10 @@ fn render_sessions(frame: &mut Frame<'_>, app: &App) {
         Line::from("[ r ] Record"),
         Line::from("[ f ] Refresh"),
         Line::from("[ s ] Settings"),
-        Line::from("[ o ] Open"),
+        Line::from("[ o/Enter ] Details"),
         Line::from("[ q ] Quit"),
         Line::from(""),
-        Line::from("Enter opens folder"),
+        Line::from("Enter opens detail"),
         Line::from("Up/Down select"),
         Line::from(""),
         Line::from(format!("Output: {output}")),
@@ -839,6 +1226,179 @@ fn render_sessions(frame: &mut Frame<'_>, app: &App) {
             .block(Block::default().title(" Actions ").borders(Borders::ALL))
             .wrap(Wrap { trim: true }),
         chunks[1],
+    );
+}
+
+fn render_session_detail(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    let chunks = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(45), Constraint::Length(28)])
+        .split(area);
+    let Some(session) = &app.detail_session else {
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from("No session selected."),
+                Line::from("[ Esc ] Back"),
+            ])
+            .block(
+                Block::default()
+                    .title(" Session Detail ")
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+        return;
+    };
+
+    let recorded = session
+        .recorded_at
+        .map(format_time)
+        .unwrap_or_else(|| "Unknown".to_string());
+    let recording_path = session.path.join("recording.wav");
+    let notes_path = session.path.join("notes.md");
+    let transcript_path = session.path.join("transcript.txt");
+    let details = vec![
+        Line::from(format!("Session       {}", session.name)),
+        Line::from(format!("Recorded      {recorded}")),
+        Line::from(format!(
+            "Status        {}",
+            session_status_text(&session.status)
+        )),
+        Line::from(format!("Directory     {}", session.path.display())),
+        Line::from(""),
+        Line::from(format!(
+            "Notes         {}",
+            available_text(notes_path.exists())
+        )),
+        Line::from(format!(
+            "Transcript    {}",
+            available_text(transcript_path.exists())
+        )),
+        Line::from(format!(
+            "Recording     {}",
+            available_text(recording_path.exists())
+        )),
+        Line::from(""),
+        Line::from(app.message.clone()),
+        confirmation_line(app.pending_session_action),
+    ];
+    frame.render_widget(
+        Paragraph::new(details)
+            .block(
+                Block::default()
+                    .title(" Session Detail ")
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: true }),
+        chunks[0],
+    );
+
+    let actions = DETAIL_ACTIONS
+        .iter()
+        .enumerate()
+        .map(|(index, action)| {
+            detail_action_line(*action, index == app.selected_detail_action, session)
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(
+        Paragraph::new(actions)
+            .block(Block::default().title(" Actions ").borders(Borders::ALL))
+            .wrap(Wrap { trim: true }),
+        chunks[1],
+    );
+}
+
+fn render_text_viewer(frame: &mut Frame<'_>, app: &App) {
+    let area = frame.area();
+    let Some(viewer) = &app.text_viewer else {
+        frame.render_widget(
+            Paragraph::new("[ Esc ] Back").block(
+                Block::default()
+                    .title(" Text Viewer ")
+                    .borders(Borders::ALL),
+            ),
+            area,
+        );
+        return;
+    };
+
+    let inner_height = area.height.saturating_sub(3).max(1) as usize;
+    let end = (viewer.scroll + inner_height).min(viewer.lines.len());
+    let visible = viewer.lines[viewer.scroll..end]
+        .iter()
+        .cloned()
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    let footer = format!(
+        "{} | lines {}-{} of {} | Up/Down PageUp/PageDown Home/End g/G | Esc back",
+        viewer.path.display(),
+        if viewer.lines.is_empty() {
+            0
+        } else {
+            viewer.scroll + 1
+        },
+        end,
+        viewer.lines.len()
+    );
+    frame.render_widget(
+        Paragraph::new(visible)
+            .block(
+                Block::default()
+                    .title(format!(" {} ", viewer.title))
+                    .borders(Borders::ALL),
+            )
+            .wrap(Wrap { trim: false }),
+        area,
+    );
+    let footer_area = Rect {
+        x: area.x + 1,
+        y: area.y + area.height.saturating_sub(1),
+        width: area.width.saturating_sub(2),
+        height: 1,
+    };
+    frame.render_widget(Paragraph::new(footer), footer_area);
+}
+
+fn render_playback(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(82, 45, frame.area());
+    let Some(playback) = &app.playback else {
+        frame.render_widget(
+            Paragraph::new("[ Esc ] Back")
+                .block(Block::default().title(" Playback ").borders(Borders::ALL)),
+            area,
+        );
+        return;
+    };
+
+    let status = if playback.is_playing() {
+        "Playing"
+    } else {
+        &playback.status
+    };
+    let position = format_duration(playback.position());
+    let duration = playback
+        .duration()
+        .map(format_duration)
+        .unwrap_or_else(|| "--:--:--".to_string());
+    let mut lines = vec![
+        Line::from(format!("Session     {}", playback.session_name)),
+        Line::from(format!("Audio file  {}", playback.path.display())),
+        Line::from(format!("Position    {position} / {duration}")),
+        Line::from(format!("Status      {status}")),
+        Line::from(""),
+        Line::from("[ Space ] Play/Pause    [ r ] Restart    [ s ] Stop"),
+        Line::from("[ Left/h ] -10s         [ Right/l ] +30s"),
+        Line::from("[ Esc ] Back"),
+    ];
+    if let Some(error) = &playback.error {
+        lines.extend([Line::from(""), Line::from(format!("Error: {error}"))]);
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(Block::default().title(" Playback ").borders(Borders::ALL))
+            .wrap(Wrap { trim: true }),
+        area,
     );
 }
 
@@ -1015,6 +1575,56 @@ fn model_status(path: &str) -> &'static str {
     }
 }
 
+fn detail_action_line(
+    action: DetailAction,
+    selected: bool,
+    session: &audio::SessionEntry,
+) -> Line<'static> {
+    let (label, shortcut, enabled) = match action {
+        DetailAction::Notes => ("Notes", "n", session.path.join("notes.md").exists()),
+        DetailAction::Transcript => (
+            "Transcript",
+            "t",
+            session.path.join("transcript.txt").exists(),
+        ),
+        DetailAction::Playback => ("Playback", "p", session.path.join("recording.wav").exists()),
+        DetailAction::OpenFolder => ("Open Folder", "o", true),
+        DetailAction::Archive => ("Archive", "a", true),
+        DetailAction::Delete => ("Delete", "d", true),
+    };
+    let prefix = if selected { "> " } else { "  " };
+    let state = if enabled { "" } else { " (missing)" };
+    let style = if selected {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if enabled {
+        Style::default()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    Line::from(Span::styled(
+        format!("{prefix}[ {shortcut} ] {label}{state}"),
+        style,
+    ))
+}
+
+fn confirmation_line(action: Option<PendingSessionAction>) -> Line<'static> {
+    match action {
+        Some(PendingSessionAction::Archive) => {
+            Line::from("Confirm archive: [ y/Enter ] yes  [ n/Esc ] no")
+        }
+        Some(PendingSessionAction::Delete) => {
+            Line::from("Confirm delete: [ y/Enter ] yes  [ n/Esc ] no")
+        }
+        None => Line::from(""),
+    }
+}
+
+fn available_text(available: bool) -> &'static str {
+    if available { "available" } else { "missing" }
+}
+
 fn session_status_text(status: &audio::SessionStatus) -> &'static str {
     match status {
         audio::SessionStatus::Empty => "empty",
@@ -1105,21 +1715,8 @@ mod tests {
 
     #[test]
     fn recording_prompt_cancel_returns_to_sessions() {
-        let mut app = App {
-            screen: Screen::NewRecording,
-            cfg: None,
-            log_path: None,
-            setup: SetupForm::from_config(None),
-            sessions: Vec::new(),
-            selected_session: 0,
-            recording_name: "Standup".to_string(),
-            recording: None,
-            recording_messages: Vec::new(),
-            processing_session: None,
-            processing_step: ProcessingStep::Finalizing,
-            processing_rx: None,
-            message: String::new(),
-        };
+        let mut app = test_app(Screen::NewRecording);
+        app.recording_name = "Standup".to_string();
 
         let quit = tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
 
@@ -1130,21 +1727,8 @@ mod tests {
     #[test]
     fn processing_complete_event_moves_to_complete_screen() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut app = App {
-            screen: Screen::Processing,
-            cfg: None,
-            log_path: None,
-            setup: SetupForm::from_config(None),
-            sessions: Vec::new(),
-            selected_session: 0,
-            recording_name: String::new(),
-            recording: None,
-            recording_messages: Vec::new(),
-            processing_session: None,
-            processing_step: ProcessingStep::Finalizing,
-            processing_rx: Some(rx),
-            message: String::new(),
-        };
+        let mut app = test_app(Screen::Processing);
+        app.processing_rx = Some(rx);
 
         tx.send(ProcessingEvent::Complete).unwrap();
         app.drain_processing_events();
@@ -1157,21 +1741,8 @@ mod tests {
     #[test]
     fn recording_status_event_updates_visible_messages() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut app = App {
-            screen: Screen::Recording,
-            cfg: None,
-            log_path: None,
-            setup: SetupForm::from_config(None),
-            sessions: Vec::new(),
-            selected_session: 0,
-            recording_name: String::new(),
-            recording: None,
-            recording_messages: Vec::new(),
-            processing_session: None,
-            processing_step: ProcessingStep::Finalizing,
-            processing_rx: Some(rx),
-            message: String::new(),
-        };
+        let mut app = test_app(Screen::Recording);
+        app.processing_rx = Some(rx);
 
         tx.send(ProcessingEvent::RecordingStatus(
             "Loopback: HD Pro Webcam C920".to_string(),
@@ -1185,21 +1756,10 @@ mod tests {
     #[test]
     fn processing_error_event_preserves_message_and_log_path() {
         let (tx, rx) = mpsc::unbounded_channel();
-        let mut app = App {
-            screen: Screen::Processing,
-            cfg: None,
-            log_path: Some(PathBuf::from("/tmp/scribe.log")),
-            setup: SetupForm::from_config(None),
-            sessions: Vec::new(),
-            selected_session: 0,
-            recording_name: String::new(),
-            recording: None,
-            recording_messages: Vec::new(),
-            processing_session: None,
-            processing_step: ProcessingStep::Transcribing,
-            processing_rx: Some(rx),
-            message: String::new(),
-        };
+        let mut app = test_app(Screen::Processing);
+        app.log_path = Some(PathBuf::from("/tmp/scribe.log"));
+        app.processing_step = ProcessingStep::Transcribing;
+        app.processing_rx = Some(rx);
 
         tx.send(ProcessingEvent::Error(
             "whisper.cpp failed: missing model".to_string(),
@@ -1211,6 +1771,249 @@ mod tests {
         assert_eq!(app.message, "whisper.cpp failed: missing model");
         assert_eq!(app.log_path, Some(PathBuf::from("/tmp/scribe.log")));
         assert!(app.processing_rx.is_none());
+    }
+
+    #[test]
+    fn enter_on_sessions_opens_session_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026-05-08_164949 — Test 1");
+        std::fs::create_dir_all(&session).unwrap();
+
+        let mut app = test_app(Screen::Sessions);
+        app.sessions = vec![audio::SessionEntry {
+            path: session.clone(),
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::Empty,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+        }];
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::SessionDetail);
+        assert_eq!(app.detail_session.as_ref().map(|s| &s.path), Some(&session));
+    }
+
+    #[test]
+    fn escape_from_detail_returns_to_sessions() {
+        let mut app = test_app(Screen::SessionDetail);
+        app.detail_session = Some(test_session_entry("2026-05-08_164949 — Test 1"));
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::Sessions);
+    }
+
+    #[test]
+    fn detail_opens_notes_text_viewer() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026-05-08_164949 — Test 1");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("notes.md"), "line 1\nline 2").unwrap();
+
+        let mut app = test_app(Screen::SessionDetail);
+        app.detail_session = Some(audio::SessionEntry {
+            path: session,
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::NotesReady,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+        });
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::TextViewer);
+        let viewer = app.text_viewer.as_ref().unwrap();
+        assert_eq!(viewer.title, "Notes");
+        assert_eq!(viewer.lines, vec!["line 1", "line 2"]);
+    }
+
+    #[test]
+    fn missing_notes_preserves_error_message_on_detail_screen() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026-05-08_164949 — Test 1");
+        std::fs::create_dir_all(&session).unwrap();
+
+        let mut app = test_app(Screen::SessionDetail);
+        app.detail_session = Some(audio::SessionEntry {
+            path: session,
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::RecordingOnly,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+        });
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::SessionDetail);
+        assert_eq!(app.message, "notes.md is not available for this session.");
+    }
+
+    #[test]
+    fn escape_from_text_viewer_returns_to_detail() {
+        let mut app = test_app(Screen::TextViewer);
+        app.text_viewer = Some(TextViewerState::new(
+            "Transcript",
+            PathBuf::from("transcript.txt"),
+            vec!["hello".to_string()],
+        ));
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::SessionDetail);
+    }
+
+    #[test]
+    fn escape_from_playback_returns_to_detail() {
+        let mut app = test_app(Screen::Playback);
+        app.playback = Some(playback::PlaybackViewState {
+            session_name: "2026-05-08_164949 — Test 1".to_string(),
+            path: PathBuf::from("recording.wav"),
+            controller: None,
+            status: "Ready".to_string(),
+            error: None,
+        });
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::SessionDetail);
+        assert_eq!(app.playback.as_ref().unwrap().status, "Stopped");
+    }
+
+    #[test]
+    fn detail_delete_requires_confirmation_and_removes_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026-05-08_164949 — Test 1");
+        std::fs::create_dir_all(&session).unwrap();
+
+        let mut app = test_app(Screen::SessionDetail);
+        app.detail_session = Some(audio::SessionEntry {
+            path: session.clone(),
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::RecordingOnly,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+        });
+
+        tokio_test_handle_key(&mut app, KeyCode::Char('d')).unwrap();
+        assert_eq!(
+            app.pending_session_action,
+            Some(PendingSessionAction::Delete)
+        );
+        assert!(session.exists());
+
+        tokio_test_handle_key(&mut app, KeyCode::Char('y')).unwrap();
+
+        assert!(!session.exists());
+        assert_eq!(app.screen, Screen::Sessions);
+        assert_eq!(app.detail_session, None);
+    }
+
+    #[test]
+    fn detail_archive_moves_session_to_archive_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026-05-08_164949 — Test 1");
+        let archive = temp.path().join("config").join("archive");
+        std::fs::create_dir_all(&session).unwrap();
+        std::fs::write(session.join("transcript.txt"), "hello").unwrap();
+
+        let mut app = test_app(Screen::SessionDetail);
+        app.detail_session = Some(audio::SessionEntry {
+            path: session.clone(),
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::TranscriptReady,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+        });
+
+        app.archive_detail_session_to(&archive).unwrap();
+
+        assert!(!session.exists());
+        assert!(archive.join("2026-05-08_164949 — Test 1").exists());
+        assert_eq!(app.screen, Screen::Sessions);
+        assert_eq!(app.detail_session, None);
+    }
+
+    #[test]
+    fn pending_detail_action_can_be_cancelled() {
+        let mut app = test_app(Screen::SessionDetail);
+        app.request_session_action(PendingSessionAction::Archive);
+
+        tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
+
+        assert_eq!(app.pending_session_action, None);
+        assert_eq!(app.message, "Cancelled.");
+        assert_eq!(app.screen, Screen::SessionDetail);
+    }
+
+    #[test]
+    fn text_viewer_scroll_clamps_at_bounds() {
+        let mut viewer = TextViewerState::new(
+            "Transcript",
+            PathBuf::from("transcript.txt"),
+            (0..5).map(|line| format!("line {line}")).collect(),
+        );
+
+        viewer.scroll_down(10);
+        assert_eq!(viewer.scroll, 4);
+
+        viewer.scroll_up(10);
+        assert_eq!(viewer.scroll, 0);
+    }
+
+    #[test]
+    fn playback_seek_helpers_clamp_to_bounds() {
+        assert_eq!(
+            playback::rewind_position(Duration::from_secs(5), Duration::from_secs(10)),
+            Duration::ZERO
+        );
+        assert_eq!(
+            playback::fast_forward_position(
+                Duration::from_secs(80),
+                Duration::from_secs(30),
+                Some(Duration::from_secs(90)),
+            ),
+            Duration::from_secs(90)
+        );
+    }
+
+    fn test_app(screen: Screen) -> App {
+        App {
+            screen,
+            cfg: None,
+            log_path: None,
+            setup: SetupForm::from_config(None),
+            sessions: Vec::new(),
+            selected_session: 0,
+            recording_name: String::new(),
+            recording: None,
+            recording_messages: Vec::new(),
+            processing_session: None,
+            processing_step: ProcessingStep::Finalizing,
+            processing_rx: None,
+            message: String::new(),
+            selected_detail_action: 0,
+            detail_session: None,
+            text_viewer: None,
+            playback: None,
+            pending_session_action: None,
+        }
+    }
+
+    fn test_session_entry(name: &str) -> audio::SessionEntry {
+        audio::SessionEntry {
+            path: PathBuf::from(name),
+            name: name.to_string(),
+            status: audio::SessionStatus::Empty,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name(name),
+        }
     }
 
     fn tokio_test_handle_key(app: &mut App, code: KeyCode) -> Result<bool> {
