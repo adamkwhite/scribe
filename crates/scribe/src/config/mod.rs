@@ -299,7 +299,7 @@ where
     .await
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
+#[cfg(all(test, feature = "auto-download-whisper-model"))]
 async fn ensure_managed_whisper_model_in_dir<F, Fut>(
     config_dir: &Path,
     downloader: F,

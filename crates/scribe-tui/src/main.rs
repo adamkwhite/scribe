@@ -1,4 +1,3 @@
-use crate::{audio, config, notes, opener, transcribe};
 use anyhow::{Context, Result};
 use crossterm::event::{self, Event, KeyCode, KeyEvent};
 use crossterm::execute;
@@ -11,12 +10,18 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use scribe::{audio, config, notes, opener, transcribe};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    run().await
+}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum Screen {

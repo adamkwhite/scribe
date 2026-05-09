@@ -1,0 +1,10 @@
+[package]
+name = "scribe-cli"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+scribe = { workspace = true }
+tokio = { workspace = true }

@@ -12,8 +12,8 @@ Local meeting transcription and note generation. Records system audio, transcrib
 
 ### External whisper.cpp CLI
 
-1. Build: `cargo build --release`
-2. Run once to generate config: `scribe.exe`
+1. Build: `cargo build --release --workspace`
+2. Run once to generate config: `scribe.exe` on Windows or `scribe-cli` on other platforms
 3. Edit config at `%APPDATA%/scribe/config.toml`:
    ```toml
    whisper_bin = "C:/path/to/whisper-cli.exe"
@@ -51,8 +51,17 @@ or validating it.
 
 ## Usage
 
+Scribe now ships separate binaries for each interface:
+
+- `scribe` starts the Windows system tray app. On macOS/Linux it prints guidance
+  and exits because the tray UI is Windows-only.
+- `scribe-cli` starts the interactive terminal CLI.
+- `scribe-tui` starts the Ratatui terminal UI when built with the `tui` feature.
+
+### CLI
+
 ```
-scribe
+cargo run -p scribe-cli
 > r        # start recording system audio
 > s        # stop recording, transcribe, generate notes
 > q        # quit
@@ -62,12 +71,12 @@ Notes are saved as timestamped Markdown files in `~/Documents/scribe/`.
 
 ### Terminal UI
 
-Build with the optional TUI feature to enable the `--tui` launch mode:
+Build and run the TUI with its package-level feature:
 
 ```sh
-cargo run --features tui -- --tui
+cargo run -p scribe-tui --features tui
 ```
 
 The TUI provides first-run setup, session browsing, recording, processing
-progress, and folder-opening actions. Without the `tui` feature, the `--tui`
-flag is not available.
+progress, and folder-opening actions. Without the `tui` feature, the
+`scribe-tui` binary target is not built.
