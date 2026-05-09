@@ -112,6 +112,7 @@ pub fn load_existing() -> Result<Option<Config>> {
 }
 
 pub fn load_from_path(path: &Path) -> Result<Config> {
+    tracing::info!(config_path = %path.display(), "loading config");
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
@@ -130,7 +131,10 @@ pub fn save_to_path(path: &Path, cfg: &Config) -> Result<()> {
             .with_context(|| format!("Failed to create {}", parent.display()))?;
     }
     let toml_str = toml::to_string_pretty(cfg)?;
-    std::fs::write(path, toml_str).with_context(|| format!("Failed to write {}", path.display()))
+    std::fs::write(path, toml_str)
+        .with_context(|| format!("Failed to write {}", path.display()))?;
+    tracing::info!(config_path = %path.display(), "config saved");
+    Ok(())
 }
 
 #[cfg_attr(not(feature = "tui"), allow(dead_code))]
@@ -180,12 +184,14 @@ pub async fn load_or_create() -> Result<Config> {
         .to_path_buf();
 
     let config = if path.exists() {
+        tracing::info!(config_path = %path.display(), "existing config found");
         load_from_path(&path)?
     } else {
         // Create a default config for the user to fill in
         let config = default_config(&config_dir);
 
         save_to_path(&path, &config)?;
+        tracing::info!(config_path = %path.display(), "default config created");
 
         println!("Created config at: {}", path.display());
         println!("Please edit it with your whisper model path and OpenRouter API key.");
@@ -325,6 +331,7 @@ where
     let model_path = managed_model_path_in_dir(config_dir);
     if model_path.exists() {
         on_event(ModelDownloadEvent::AlreadyPresent(model_path.clone()));
+        tracing::info!(model_path = %model_path.display(), "managed Whisper model already present");
         return Ok(model_path);
     }
 
@@ -334,9 +341,19 @@ where
     let download_path = model_path.with_extension("bin.download");
     let _ = std::fs::remove_file(&download_path);
     on_event(ModelDownloadEvent::Downloading(model_path.clone()));
+    tracing::info!(
+        model_path = %model_path.display(),
+        download_path = %download_path.display(),
+        "managed Whisper model download starting"
+    );
 
     if let Err(error) = downloader(download_path.clone()).await {
         let _ = std::fs::remove_file(&download_path);
+        tracing::warn!(
+            error = %error,
+            model_path = %model_path.display(),
+            "managed Whisper model download failed"
+        );
         return Err(error);
     }
 
@@ -349,6 +366,7 @@ where
     })?;
 
     on_event(ModelDownloadEvent::Downloaded(model_path.clone()));
+    tracing::info!(model_path = %model_path.display(), "managed Whisper model downloaded");
     Ok(model_path)
 }
 

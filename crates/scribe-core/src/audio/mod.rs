@@ -72,6 +72,21 @@ impl AudioRecordingEvent {
     }
 }
 
+fn emit_recording_event<F>(on_event: &F, event: AudioRecordingEvent)
+where
+    F: Fn(AudioRecordingEvent),
+{
+    match &event {
+        AudioRecordingEvent::StreamError { .. } => {
+            tracing::warn!(message = %event.message(), "audio recording event");
+        }
+        _ => {
+            tracing::info!(message = %event.message(), "audio recording event");
+        }
+    }
+    on_event(event);
+}
+
 /// Shared buffer for mixing two audio streams.
 /// Each stream pushes mono f32 samples; the writer drains and mixes them.
 struct MixBuffer {
@@ -164,12 +179,14 @@ where
         .default_input_device()
         .context("No default input (mic) device found")?;
 
-    on_event(AudioRecordingEvent::LoopbackDevice(
-        loopback_device.name().unwrap_or_default(),
-    ));
-    on_event(AudioRecordingEvent::MicDevice(
-        mic_device.name().unwrap_or_default(),
-    ));
+    emit_recording_event(
+        &*on_event,
+        AudioRecordingEvent::LoopbackDevice(loopback_device.name().unwrap_or_default()),
+    );
+    emit_recording_event(
+        &*on_event,
+        AudioRecordingEvent::MicDevice(mic_device.name().unwrap_or_default()),
+    );
 
     let loopback_config = loopback_device
         .default_output_config()
@@ -183,13 +200,16 @@ where
     // Use the loopback sample rate for the output WAV (mic will be at its native rate,
     // but since both are typically 48kHz or 44.1kHz on Windows this usually matches)
     let output_sample_rate = loopback_config.sample_rate().0;
-    on_event(AudioRecordingEvent::AudioConfig {
-        loopback_sample_rate: loopback_config.sample_rate().0,
-        loopback_channels: loopback_config.channels(),
-        mic_sample_rate: mic_config.sample_rate().0,
-        mic_channels: mic_config.channels(),
-        output_sample_rate,
-    });
+    emit_recording_event(
+        &*on_event,
+        AudioRecordingEvent::AudioConfig {
+            loopback_sample_rate: loopback_config.sample_rate().0,
+            loopback_channels: loopback_config.channels(),
+            mic_sample_rate: mic_config.sample_rate().0,
+            mic_channels: mic_config.channels(),
+            output_sample_rate,
+        },
+    );
 
     let spec = WavSpec {
         channels: 1, // mono mix
@@ -227,10 +247,13 @@ where
                 }
             },
             move |err| {
-                report_lb_f32(AudioRecordingEvent::StreamError {
-                    source: "Loopback",
-                    error: err.to_string(),
-                })
+                emit_recording_event(
+                    &*report_lb_f32,
+                    AudioRecordingEvent::StreamError {
+                        source: "Loopback",
+                        error: err.to_string(),
+                    },
+                )
             },
             None,
         )?,
@@ -246,10 +269,13 @@ where
                 }
             },
             move |err| {
-                report_lb_i16(AudioRecordingEvent::StreamError {
-                    source: "Loopback",
-                    error: err.to_string(),
-                })
+                emit_recording_event(
+                    &*report_lb_i16,
+                    AudioRecordingEvent::StreamError {
+                        source: "Loopback",
+                        error: err.to_string(),
+                    },
+                )
             },
             None,
         )?,
@@ -276,10 +302,13 @@ where
                 }
             },
             move |err| {
-                report_mic_f32(AudioRecordingEvent::StreamError {
-                    source: "Mic",
-                    error: err.to_string(),
-                })
+                emit_recording_event(
+                    &*report_mic_f32,
+                    AudioRecordingEvent::StreamError {
+                        source: "Mic",
+                        error: err.to_string(),
+                    },
+                )
             },
             None,
         )?,
@@ -295,10 +324,13 @@ where
                 }
             },
             move |err| {
-                report_mic_i16(AudioRecordingEvent::StreamError {
-                    source: "Mic",
-                    error: err.to_string(),
-                })
+                emit_recording_event(
+                    &*report_mic_i16,
+                    AudioRecordingEvent::StreamError {
+                        source: "Mic",
+                        error: err.to_string(),
+                    },
+                )
             },
             None,
         )?,
@@ -353,7 +385,7 @@ where
         w.finalize().context("Failed to finalize WAV")?;
     }
 
-    on_event(AudioRecordingEvent::SavedRecording(wav_path));
+    emit_recording_event(&*on_event, AudioRecordingEvent::SavedRecording(wav_path));
     Ok(())
 }
 

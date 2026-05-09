@@ -1,4 +1,3 @@
-use anyhow::Result;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_item::TrayItem;
@@ -187,6 +186,9 @@ pub async fn run(cfg: config::Config) -> Result<()> {
         match event {
             TrayEvent::StartRecording => {
                 if recording.load(Ordering::Relaxed) {
+                    tracing::info!(
+                        "tray start command ignored because recording is already active"
+                    );
                     println!("Already recording.");
                     continue;
                 }
@@ -199,10 +201,12 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                 let session_dir = match audio::create_session_dir(&cfg, name.as_deref()) {
                     Ok(d) => d,
                     Err(e) => {
+                        tracing::error!(error = %e, "tray failed to create recording session");
                         eprintln!("Failed to create session: {e}");
                         continue;
                     }
                 };
+                tracing::info!(session_dir = %session_dir.display(), "tray recording session created");
                 println!("Session: {}", session_dir.display());
 
                 recording.store(true, Ordering::Relaxed);
@@ -210,19 +214,24 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                 let sample_rate = cfg.sample_rate;
                 tokio::task::spawn_blocking(move || {
                     if let Err(e) = audio::record_loopback(rec, sample_rate, session_dir) {
+                        tracing::error!(error = %e, "tray recording failed");
                         eprintln!("Recording error: {e}");
                     }
                 });
+                tracing::info!("tray recording started");
                 println!("Recording started.");
             }
             TrayEvent::StopRecording => {
                 if !recording.load(Ordering::Relaxed) {
+                    tracing::info!("tray stop command ignored because no recording is active");
                     println!("Not recording.");
                     continue;
                 }
                 recording.store(false, Ordering::Relaxed);
+                tracing::info!("tray recording stop requested");
                 println!("Recording stopped. Processing...");
                 if let Err(e) = process_recording(&cfg).await {
+                    tracing::error!(error = %e, "tray processing failed");
                     eprintln!("Processing error: {e}");
                 }
             }
@@ -240,6 +249,7 @@ pub async fn run(cfg: config::Config) -> Result<()> {
             }
             TrayEvent::Quit => {
                 recording.store(false, Ordering::Relaxed);
+                tracing::info!("scribe tray exiting");
                 println!("Bye.");
                 std::process::exit(0);
             }

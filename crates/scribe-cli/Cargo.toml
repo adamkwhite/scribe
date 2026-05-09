@@ -13,3 +13,4 @@ auto-download-whisper-model = ["scribe-core/auto-download-whisper-model"]
 anyhow = { workspace = true }
 scribe-core = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }

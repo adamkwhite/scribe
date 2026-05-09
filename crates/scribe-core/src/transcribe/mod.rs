@@ -10,6 +10,12 @@ const WHISPER_SAMPLE_RATE: u32 = 16_000;
 #[cfg(not(feature = "embedded-whisper"))]
 pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
     let whisper_bin = external_whisper_bin(cfg)?;
+    tracing::info!(
+        whisper_bin,
+        whisper_model = %cfg.whisper_model,
+        wav_path = %wav_path.display(),
+        "running external whisper"
+    );
     let output = tokio::process::Command::new(whisper_bin)
         .args([
             "--model",
@@ -24,6 +30,11 @@ pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        tracing::error!(
+            status = ?output.status,
+            stderr = %stderr,
+            "external whisper failed"
+        );
         anyhow::bail!("whisper.cpp failed: {stderr}");
     }
 
@@ -34,10 +45,18 @@ pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
             std::fs::read_to_string(&txt_path).context("Failed to read whisper output")?;
         // Clean up the intermediate txt file
         let _ = std::fs::remove_file(&txt_path);
+        tracing::info!(
+            transcript_chars = transcript.trim().len(),
+            "external whisper transcript read from output file"
+        );
         Ok(transcript.trim().to_string())
     } else {
         // Some versions write to stdout instead
         let stdout = String::from_utf8_lossy(&output.stdout);
+        tracing::info!(
+            transcript_chars = stdout.trim().len(),
+            "external whisper transcript read from stdout"
+        );
         Ok(stdout.trim().to_string())
     }
 }
@@ -47,6 +66,11 @@ pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
 pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
     let wav_path = wav_path.to_path_buf();
     let model_path = cfg.whisper_model.clone();
+    tracing::info!(
+        wav_path = %wav_path.display(),
+        whisper_model = %model_path,
+        "running embedded whisper"
+    );
 
     tokio::task::spawn_blocking(move || run_embedded_whisper(&wav_path, &model_path))
         .await

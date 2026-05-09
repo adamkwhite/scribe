@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use scribe_core::{audio, config, notes, opener, transcribe};
+use scribe_core::{audio, config, logging, notes, opener, transcribe};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -86,6 +86,7 @@ enum ProcessingEvent {
 struct App {
     screen: Screen,
     cfg: Option<config::Config>,
+    log_path: Option<PathBuf>,
     setup: SetupForm,
     sessions: Vec<audio::SessionEntry>,
     selected_session: usize,
@@ -99,10 +100,17 @@ struct App {
 }
 
 pub async fn run() -> Result<()> {
-    let mut app = App::load()?;
+    let log_path = logging::init_file_logging("scribe-tui")?;
+    tracing::info!(log_path = %log_path.display(), "scribe TUI starting");
+    let mut app = App::load(Some(log_path))?;
     let mut terminal = setup_terminal()?;
     let result = run_loop(&mut terminal, &mut app).await;
     restore_terminal(&mut terminal)?;
+    if let Err(error) = &result {
+        tracing::error!(error = %error, "scribe TUI exited with error");
+    } else {
+        tracing::info!("scribe TUI exiting");
+    }
     result
 }
 
@@ -235,12 +243,13 @@ fn handle_error_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 }
 
 impl App {
-    fn load() -> Result<Self> {
+    fn load(log_path: Option<PathBuf>) -> Result<Self> {
         let cfg = config::load_existing()?;
         let setup = SetupForm::from_config(cfg.as_ref());
         let mut app = Self {
             screen: Screen::Setup,
             cfg,
+            log_path,
             setup,
             sessions: Vec::new(),
             selected_session: 0,
@@ -272,8 +281,14 @@ impl App {
             config::validate_setup(&cfg)?;
             Ok(cfg)
         }) {
-            Ok(_) => self.setup.message = "Setup looks valid.".to_string(),
-            Err(error) => self.setup.message = error.to_string(),
+            Ok(_) => {
+                tracing::info!("TUI setup validation succeeded");
+                self.setup.message = "Setup looks valid.".to_string();
+            }
+            Err(error) => {
+                tracing::warn!(error = %error, "TUI setup validation failed");
+                self.setup.message = error.to_string();
+            }
         }
     }
 
@@ -282,6 +297,7 @@ impl App {
         let mut last_message = self.setup.message.clone();
         match config::ensure_managed_whisper_model_with_events(|event| {
             last_message = event.message();
+            tracing::info!(message = %last_message, "TUI model download status");
         })
         .await
         {
@@ -289,7 +305,10 @@ impl App {
                 self.setup.whisper_model = path.to_string_lossy().into_owned();
                 self.setup.message = last_message;
             }
-            Err(error) => self.setup.message = error.to_string(),
+            Err(error) => {
+                tracing::warn!(error = %error, "TUI model download failed");
+                self.setup.message = error.to_string();
+            }
         }
     }
 
@@ -299,6 +318,7 @@ impl App {
             config::resolve_managed_whisper_model_config(self.setup.to_config()?, &config_dir);
         config::validate_setup(&cfg)?;
         config::save(&cfg)?;
+        tracing::info!("TUI setup saved");
         self.cfg = Some(cfg);
         self.reload_sessions();
         self.screen = Screen::Sessions;
@@ -315,7 +335,10 @@ impl App {
                     }
                     self.message.clear();
                 }
-                Err(error) => self.message = error.to_string(),
+                Err(error) => {
+                    tracing::warn!(error = %error, "TUI session reload failed");
+                    self.message = error.to_string();
+                }
             }
         }
     }
@@ -332,6 +355,7 @@ impl App {
 
     fn open_selected_session(&mut self) -> Result<()> {
         if let Some(session) = self.sessions.get(self.selected_session) {
+            tracing::info!(session_dir = %session.path.display(), "TUI opening session folder");
             opener::open_folder(&session.path)?;
         }
         Ok(())
@@ -339,6 +363,7 @@ impl App {
 
     fn open_processing_session(&mut self) -> Result<()> {
         if let Some(path) = &self.processing_session {
+            tracing::info!(session_dir = %path.display(), "TUI opening processed session folder");
             opener::open_folder(path)?;
         }
         Ok(())
@@ -353,6 +378,7 @@ impl App {
             Some(trimmed_name)
         };
         let session_dir = audio::create_session_dir(cfg, name)?;
+        tracing::info!(session_dir = %session_dir.display(), "TUI recording session created");
         let recording = Arc::new(AtomicBool::new(true));
         let recording_for_task = recording.clone();
         let sample_rate = cfg.sample_rate;
@@ -386,6 +412,7 @@ impl App {
         self.processing_step = ProcessingStep::Finalizing;
         self.message.clear();
         self.screen = Screen::Recording;
+        tracing::info!("TUI recording started");
         Ok(())
     }
 
@@ -401,6 +428,10 @@ impl App {
         self.processing_step = ProcessingStep::Finalizing;
         self.screen = Screen::Processing;
         recording.recording_flag.store(false, Ordering::Relaxed);
+        tracing::info!(
+            session_dir = %recording.session_dir.display(),
+            "TUI recording stop requested; processing starting"
+        );
         let (tx, rx) = mpsc::unbounded_channel();
         self.processing_rx = Some(rx);
         spawn_processing_task(tx, cfg, recording);
@@ -433,6 +464,7 @@ impl App {
                     self.screen = Screen::Complete;
                 }
                 ProcessingEvent::Error(message) => {
+                    tracing::error!(error = %message, "TUI processing failed");
                     self.message = message;
                     self.processing_rx = None;
                     self.reload_sessions();
@@ -450,13 +482,18 @@ fn spawn_processing_task(
 ) {
     tokio::spawn(async move {
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::Finalizing));
+        tracing::info!("TUI processing finalizing recording");
         match recording.task.await {
-            Ok(Ok(())) => {}
+            Ok(Ok(())) => {
+                tracing::info!("TUI recording finalized");
+            }
             Ok(Err(error)) => {
+                tracing::error!(error = %error, "TUI recording finalization failed");
                 let _ = tx.send(ProcessingEvent::Error(error.to_string()));
                 return;
             }
             Err(error) => {
+                tracing::error!(error = %error, "TUI recording task failed to join");
                 let _ = tx.send(ProcessingEvent::Error(format!(
                     "Recording task failed to join: {error}"
                 )));
@@ -467,36 +504,71 @@ fn spawn_processing_task(
         let session_dir = recording.session_dir;
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::Transcribing));
         let wav_path = session_dir.join("recording.wav");
+        tracing::info!(
+            session_dir = %session_dir.display(),
+            wav_path = %wav_path.display(),
+            "TUI transcription starting"
+        );
         let transcript = match transcribe::run_whisper(&wav_path, &cfg).await {
             Ok(transcript) => transcript,
             Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    session_dir = %session_dir.display(),
+                    wav_path = %wav_path.display(),
+                    "TUI transcription failed"
+                );
                 let _ = tx.send(ProcessingEvent::Error(error.to_string()));
                 return;
             }
         };
+        tracing::info!(
+            session_dir = %session_dir.display(),
+            transcript_chars = transcript.len(),
+            "TUI transcription completed"
+        );
 
         let txt_path = session_dir.join("transcript.txt");
         if let Err(error) = std::fs::write(&txt_path, &transcript) {
+            tracing::error!(
+                error = %error,
+                transcript_path = %txt_path.display(),
+                "TUI transcript write failed"
+            );
             let _ = tx.send(ProcessingEvent::Error(error.to_string()));
             return;
         }
+        tracing::info!(transcript_path = %txt_path.display(), "TUI transcript saved");
 
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::GeneratingNotes));
+        tracing::info!(session_dir = %session_dir.display(), "TUI notes generation starting");
         let notes_text = match notes::generate(&transcript, &cfg).await {
             Ok(notes) => notes,
             Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    session_dir = %session_dir.display(),
+                    "TUI notes generation failed"
+                );
                 let _ = tx.send(ProcessingEvent::Error(error.to_string()));
                 return;
             }
         };
+        tracing::info!(session_dir = %session_dir.display(), "TUI notes generation completed");
 
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::WritingNotes));
         let full_notes = format!("{notes_text}\n\n---\n\n## Raw Transcript\n\n{transcript}\n");
         let notes_path = session_dir.join("notes.md");
         if let Err(error) = std::fs::write(&notes_path, &full_notes) {
+            tracing::error!(
+                error = %error,
+                notes_path = %notes_path.display(),
+                "TUI notes write failed"
+            );
             let _ = tx.send(ProcessingEvent::Error(error.to_string()));
             return;
         }
+        tracing::info!(notes_path = %notes_path.display(), "TUI notes saved");
 
         let _ = tx.send(ProcessingEvent::Complete);
     });
@@ -848,11 +920,18 @@ fn render_complete(frame: &mut Frame<'_>, app: &App) {
 
 fn render_error(frame: &mut Frame<'_>, app: &App) {
     let area = centered_rect(76, 35, frame.area());
+    let log_path = app
+        .log_path
+        .as_ref()
+        .map(|path| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Unavailable".to_string());
     frame.render_widget(
         Paragraph::new(vec![
             Line::from("Processing failed"),
             Line::from(""),
-            Line::from(app.message.clone()),
+            Line::from(format!("Error: {}", app.message)),
+            Line::from(""),
+            Line::from(format!("Log: {log_path}")),
             Line::from(""),
             Line::from("[ b/Esc ] Back to sessions    [ q ] Quit"),
         ])
@@ -1005,6 +1084,7 @@ mod tests {
         let mut app = App {
             screen: Screen::NewRecording,
             cfg: None,
+            log_path: None,
             setup: SetupForm::from_config(None),
             sessions: Vec::new(),
             selected_session: 0,
@@ -1029,6 +1109,7 @@ mod tests {
         let mut app = App {
             screen: Screen::Processing,
             cfg: None,
+            log_path: None,
             setup: SetupForm::from_config(None),
             sessions: Vec::new(),
             selected_session: 0,
@@ -1055,6 +1136,7 @@ mod tests {
         let mut app = App {
             screen: Screen::Recording,
             cfg: None,
+            log_path: None,
             setup: SetupForm::from_config(None),
             sessions: Vec::new(),
             selected_session: 0,
@@ -1074,6 +1156,37 @@ mod tests {
         app.drain_processing_events();
 
         assert_eq!(app.recording_messages, vec!["Loopback: HD Pro Webcam C920"]);
+    }
+
+    #[test]
+    fn processing_error_event_preserves_message_and_log_path() {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let mut app = App {
+            screen: Screen::Processing,
+            cfg: None,
+            log_path: Some(PathBuf::from("/tmp/scribe.log")),
+            setup: SetupForm::from_config(None),
+            sessions: Vec::new(),
+            selected_session: 0,
+            recording_name: String::new(),
+            recording: None,
+            recording_messages: Vec::new(),
+            processing_session: None,
+            processing_step: ProcessingStep::Transcribing,
+            processing_rx: Some(rx),
+            message: String::new(),
+        };
+
+        tx.send(ProcessingEvent::Error(
+            "whisper.cpp failed: missing model".to_string(),
+        ))
+        .unwrap();
+        app.drain_processing_events();
+
+        assert_eq!(app.screen, Screen::Error);
+        assert_eq!(app.message, "whisper.cpp failed: missing model");
+        assert_eq!(app.log_path, Some(PathBuf::from("/tmp/scribe.log")));
+        assert!(app.processing_rx.is_none());
     }
 
     fn tokio_test_handle_key(app: &mut App, code: KeyCode) -> Result<bool> {

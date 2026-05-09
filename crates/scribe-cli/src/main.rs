@@ -6,6 +6,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let log_path = scribe_core::logging::init_file_logging("scribe-cli")?;
+    tracing::info!(log_path = %log_path.display(), "scribe CLI starting");
     let cfg = config::load_or_create().await?;
     run_cli(cfg).await
 }
@@ -28,6 +30,7 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
         match line.trim() {
             cmd if cmd.starts_with("r") => {
                 if recording.load(Ordering::Relaxed) {
+                    tracing::info!("record command ignored because recording is already active");
                     println!("Already recording.");
                     continue;
                 }
@@ -45,6 +48,7 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                 }
 
                 let session_dir = audio::create_session_dir(&cfg, name.as_deref())?;
+                tracing::info!(session_dir = %session_dir.display(), "CLI recording session created");
                 println!("Session: {}", session_dir.display());
 
                 *current_session.lock().unwrap() = Some(session_dir.clone());
@@ -55,25 +59,30 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                 recording_task = Some(tokio::task::spawn_blocking(move || {
                     audio::record_loopback(rec, sample_rate, session_dir)
                 }));
+                tracing::info!("CLI recording started");
                 println!("Recording started. Press 's' to stop.");
             }
             "s" | "stop" => {
                 if !recording.load(Ordering::Relaxed) {
+                    tracing::info!("stop command ignored because no recording is active");
                     println!("Not recording.");
                     continue;
                 }
                 recording.store(false, Ordering::Relaxed);
+                tracing::info!("CLI recording stop requested");
                 println!("Recording stopped. Finalizing...");
                 wait_for_recording_task(&mut recording_task).await?;
                 println!("Processing...");
                 process_recording(&cfg).await?;
             }
             "t" | "transcribe" => {
+                tracing::info!("CLI process latest session requested");
                 process_recording(&cfg).await?;
             }
             "q" | "quit" => {
                 recording.store(false, Ordering::Relaxed);
                 wait_for_recording_task(&mut recording_task).await?;
+                tracing::info!("scribe CLI exiting");
                 println!("Bye.");
                 break;
             }

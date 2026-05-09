@@ -78,6 +78,11 @@ pub async fn generate(transcript: &str, cfg: &Config) -> Result<String> {
 
     let today = chrono::Local::now().format("%B %-d, %Y").to_string();
     let request = build_request(transcript, &cfg.model, &today);
+    tracing::info!(
+        model = %cfg.model,
+        transcript_chars = transcript.len(),
+        "calling OpenRouter notes API"
+    );
 
     let response = client
         .post(OPENROUTER_URL)
@@ -94,6 +99,11 @@ pub async fn generate(transcript: &str, cfg: &Config) -> Result<String> {
     if !response.status().is_success() {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
+        tracing::error!(
+            status = %status,
+            response_chars = body.len(),
+            "OpenRouter notes API returned error"
+        );
         anyhow::bail!("OpenRouter API error ({status}): {body}");
     }
 
@@ -102,7 +112,12 @@ pub async fn generate(transcript: &str, cfg: &Config) -> Result<String> {
         .await
         .context("Failed to parse OpenRouter response")?;
 
-    extract_content(chat)
+    let notes = extract_content(chat)?;
+    tracing::info!(
+        notes_chars = notes.len(),
+        "OpenRouter notes API response parsed"
+    );
+    Ok(notes)
 }
 
 #[cfg(test)]
