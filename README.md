@@ -4,50 +4,52 @@ Local meeting transcription and note generation. Records system audio, transcrib
 
 ## Prerequisites
 
-- [whisper.cpp](https://github.com/ggerganov/whisper.cpp) — download a release or build from source, unless building with `--features embedded-whisper`
-- A whisper model file (e.g., `ggml-base.en.bin`) — download from the whisper.cpp repo
+- Native build tools such as CMake and a C/C++ toolchain for the default embedded Whisper backend
+- A whisper model file (e.g., `ggml-base.en.bin`) — provide a path in config or let Scribe download the managed base English model
 - [OpenRouter](https://openrouter.ai/) API key
 
 ## Setup
 
-### External whisper.cpp CLI
+### Default embedded Whisper backend
 
 1. Build: `cargo build --release --workspace`
 2. Run once to generate config: `scribe.exe` on Windows or `scribe-cli` on other platforms
 3. Edit config at `%APPDATA%/scribe/config.toml`:
    ```toml
-   whisper_bin = "C:/path/to/whisper-cli.exe"
    whisper_model = "C:/path/to/ggml-base.en.bin"
    openrouter_api_key = "sk-or-..."
    ```
 
-### Embedded whisper.cpp
-
-Build with the optional embedded backend:
-
-```sh
-cargo build --release -p scribe-cli --features embedded-whisper
-```
-
-This uses the `whisper-rs` bindings, which build `whisper.cpp` during Cargo's native build. The built binary no longer needs `whisper-cli` on the host, but the build machine needs native build tools such as CMake and a C/C++ toolchain, and the app still needs a `whisper_model` path:
+The default build uses the `whisper-rs` bindings, which build `whisper.cpp`
+during Cargo's native build. The built binary does not need `whisper-cli` on the
+host, but it still needs a model path:
 
 ```toml
 whisper_model = "C:/path/to/ggml-base.en.bin"
 openrouter_api_key = "sk-or-..."
 ```
 
-### Automatic model download
+If the config uses the managed model path, Scribe downloads `ggml-base.en.bin`
+under the same directory as the application config on first startup. Later runs
+reuse the existing file without re-downloading it. The TUI setup screen also has
+a Download model action for this managed path.
 
-The optional `auto-download-whisper-model` feature manages `ggml-base.en.bin`
-under the same directory as the application config:
+### External whisper.cpp CLI
+
+Build with the opt-out `whisper-cli` backend when you want to use an installed
+whisper.cpp executable instead of the embedded backend:
 
 ```sh
-cargo build --release -p scribe-cli --features auto-download-whisper-model
+cargo build --release -p scribe-cli --no-default-features --features whisper-cli
 ```
 
-When enabled, Scribe downloads the model on first startup if it is missing from
-the config directory. Later runs reuse the existing file without re-downloading
-or validating it.
+Configure the executable path in addition to the model:
+
+```toml
+whisper_bin = "C:/path/to/whisper-cli.exe"
+whisper_model = "C:/path/to/ggml-base.en.bin"
+openrouter_api_key = "sk-or-..."
+```
 
 ## Usage
 
@@ -89,6 +91,8 @@ crates expose pass-through features for the shared implementation where useful,
 for example:
 
 ```sh
-cargo run -p scribe-cli --features embedded-whisper
-cargo run -p scribe-tui --features tui,embedded-whisper
+cargo run -p scribe-cli
+cargo run -p scribe-cli --no-default-features --features whisper-cli
+cargo run -p scribe-tui --features tui
+cargo run -p scribe-tui --no-default-features --features tui,whisper-cli
 ```

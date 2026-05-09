@@ -5,9 +5,9 @@ edition.workspace = true
 description.workspace = true
 
 [features]
-default = []
-embedded-whisper = ["dep:whisper-rs"]
-auto-download-whisper-model = []
+default = ["__embedded-whisper"]
+__embedded-whisper = ["dep:whisper-rs"]
+whisper-cli = []
 tui = []
 
 [dependencies]

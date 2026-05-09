@@ -1,13 +1,31 @@
-use anyhow::{Context, Result};
+#[cfg(any(
+    feature = "whisper-cli",
+    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
+))]
+use anyhow::Context;
+use anyhow::Result;
 use std::path::Path;
 
 use crate::config::Config;
 
-#[cfg(any(test, feature = "embedded-whisper"))]
+#[cfg(all(not(feature = "whisper-cli"), not(feature = "__embedded-whisper")))]
+compile_error!(
+    "scribe-core requires either the default embedded Whisper backend or the `whisper-cli` feature"
+);
+
+#[cfg(all(not(feature = "whisper-cli"), not(feature = "__embedded-whisper")))]
+pub async fn run_whisper(_wav_path: &Path, _cfg: &Config) -> Result<String> {
+    unreachable!("invalid backend feature configuration")
+}
+
+#[cfg(any(
+    test,
+    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
+))]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
 /// Run the configured Whisper backend on a WAV file and return the transcript text.
-#[cfg(not(feature = "embedded-whisper"))]
+#[cfg(feature = "whisper-cli")]
 pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
     let whisper_bin = external_whisper_bin(cfg)?;
     tracing::info!(
@@ -62,7 +80,7 @@ pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
 }
 
 /// Run the embedded whisper.cpp backend on a WAV file and return the transcript text.
-#[cfg(feature = "embedded-whisper")]
+#[cfg(all(not(feature = "whisper-cli"), feature = "__embedded-whisper"))]
 pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
     let wav_path = wav_path.to_path_buf();
     let model_path = cfg.whisper_model.clone();
@@ -77,14 +95,14 @@ pub async fn run_whisper(wav_path: &Path, cfg: &Config) -> Result<String> {
         .context("Embedded whisper task failed")?
 }
 
-#[cfg(any(test, not(feature = "embedded-whisper")))]
+#[cfg(any(test, feature = "whisper-cli"))]
 fn external_whisper_bin(cfg: &Config) -> Result<&str> {
     cfg.whisper_bin
         .as_deref()
-        .context("whisper_bin is required when embedded-whisper is disabled")
+        .context("whisper_bin is required when the whisper-cli backend is enabled")
 }
 
-#[cfg(feature = "embedded-whisper")]
+#[cfg(all(not(feature = "whisper-cli"), feature = "__embedded-whisper"))]
 fn run_embedded_whisper(wav_path: &Path, model_path: &str) -> Result<String> {
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
@@ -120,7 +138,10 @@ fn run_embedded_whisper(wav_path: &Path, model_path: &str) -> Result<String> {
     Ok(transcript.trim().to_string())
 }
 
-#[cfg(any(test, feature = "embedded-whisper"))]
+#[cfg(any(
+    test,
+    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
+))]
 fn load_wav_as_mono_16khz_f32(wav_path: &Path) -> Result<Vec<f32>> {
     let reader = hound::WavReader::open(wav_path)
         .with_context(|| format!("Failed to open {}", wav_path.display()))?;
@@ -160,7 +181,10 @@ fn load_wav_as_mono_16khz_f32(wav_path: &Path) -> Result<Vec<f32>> {
     Ok(resample_to_16khz(&mono, spec.sample_rate))
 }
 
-#[cfg(any(test, feature = "embedded-whisper"))]
+#[cfg(any(
+    test,
+    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
+))]
 fn resample_to_16khz(samples: &[f32], source_rate: u32) -> Vec<f32> {
     if source_rate == WHISPER_SAMPLE_RATE || samples.is_empty() {
         return samples.to_vec();
@@ -203,7 +227,7 @@ mod tests {
         assert!(
             error
                 .to_string()
-                .contains("whisper_bin is required when embedded-whisper is disabled")
+                .contains("whisper_bin is required when the whisper-cli backend is enabled")
         );
     }
 

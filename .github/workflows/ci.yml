@@ -43,15 +43,21 @@ jobs:
       - name: Build
         run: cargo build --workspace --verbose
 
-      - name: Build core embedded whisper feature
+      - name: Build core default embedded whisper backend
         if: matrix.os == 'ubuntu-latest'
-        run: cargo build -p scribe-core --verbose --features embedded-whisper
+        run: cargo build -p scribe-core --verbose
 
-      - name: Build core auto-download feature
-        run: cargo build -p scribe-core --verbose --features auto-download-whisper-model
+      - name: Test core whisper CLI backend
+        run: cargo test -p scribe-core --no-default-features --features whisper-cli --verbose
+
+      - name: Build CLI whisper CLI backend
+        run: cargo build -p scribe-cli --no-default-features --features whisper-cli --verbose
 
       - name: Build TUI feature
         run: cargo build -p scribe-tui --features tui --verbose
+
+      - name: Build TUI whisper CLI backend
+        run: cargo build -p scribe-tui --no-default-features --features tui,whisper-cli --verbose
 
       - name: Test
         run: cargo test --workspace --verbose

@@ -579,7 +579,7 @@ impl SetupForm {
         let default_cfg = config::config_dir()
             .map(|dir| config::default_config(&dir))
             .unwrap_or_else(|_| config::Config {
-                whisper_bin: Some("whisper-cli".to_string()),
+                whisper_bin: default_setup_whisper_bin(),
                 whisper_model: "ggml-base.en.bin".to_string(),
                 openrouter_api_key: "YOUR_KEY_HERE".to_string(),
                 model: "google/gemini-2.5-flash".to_string(),
@@ -656,6 +656,18 @@ impl SetupForm {
     }
 }
 
+fn default_setup_whisper_bin() -> Option<String> {
+    #[cfg(feature = "whisper-cli")]
+    {
+        Some("whisper-cli".to_string())
+    }
+
+    #[cfg(not(feature = "whisper-cli"))]
+    {
+        None
+    }
+}
+
 fn next_setup_focus(focus: SetupFocus) -> SetupFocus {
     match focus {
         SetupFocus::ApiKey => SetupFocus::NotesModel,
@@ -712,7 +724,7 @@ fn render_setup(frame: &mut Frame<'_>, app: &App) {
             &app.setup.model,
             app.setup.focus == SetupFocus::NotesModel,
         ),
-        Line::from("Whisper backend    whisper.cpp CLI"),
+        Line::from(format!("Whisper backend    {}", whisper_backend_label())),
         field_line(
             "whisper_bin",
             &app.setup.whisper_bin,
@@ -754,6 +766,18 @@ fn render_setup(frame: &mut Frame<'_>, app: &App) {
             .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn whisper_backend_label() -> &'static str {
+    #[cfg(feature = "whisper-cli")]
+    {
+        "whisper.cpp CLI"
+    }
+
+    #[cfg(not(feature = "whisper-cli"))]
+    {
+        "embedded whisper.cpp"
+    }
 }
 
 fn render_sessions(frame: &mut Frame<'_>, app: &App) {

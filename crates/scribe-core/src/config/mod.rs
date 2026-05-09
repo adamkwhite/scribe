@@ -1,17 +1,13 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 use std::future::Future;
 use std::path::{Path, PathBuf};
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 const MANAGED_MODEL_FILENAME: &str = "ggml-base.en.bin";
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 const MANAGED_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ModelDownloadEvent {
     AlreadyPresent(PathBuf),
@@ -19,7 +15,6 @@ pub enum ModelDownloadEvent {
     Downloaded(PathBuf),
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 impl ModelDownloadEvent {
     pub fn message(&self) -> String {
         match self {
@@ -148,7 +143,7 @@ pub fn validate_setup(cfg: &Config) -> Result<()> {
         anyhow::bail!("Notes model is required");
     }
 
-    #[cfg(not(feature = "embedded-whisper"))]
+    #[cfg(feature = "whisper-cli")]
     {
         if cfg
             .whisper_bin
@@ -157,7 +152,7 @@ pub fn validate_setup(cfg: &Config) -> Result<()> {
             .filter(|bin| !bin.is_empty())
             .is_none()
         {
-            anyhow::bail!("whisper_bin is required when embedded-whisper is disabled");
+            anyhow::bail!("whisper_bin is required when the whisper-cli backend is enabled");
         }
     }
 
@@ -195,30 +190,19 @@ pub async fn load_or_create() -> Result<Config> {
 
         println!("Created config at: {}", path.display());
         println!("Please edit it with your whisper model path and OpenRouter API key.");
-        #[cfg(all(
-            not(feature = "embedded-whisper"),
-            not(feature = "auto-download-whisper-model")
-        ))]
+        #[cfg(feature = "whisper-cli")]
         println!("Set whisper_bin to your whisper.cpp executable path.\n");
-        #[cfg(any(feature = "embedded-whisper", feature = "auto-download-whisper-model"))]
+        #[cfg(not(feature = "whisper-cli"))]
         println!();
 
         config
     };
 
-    #[cfg(feature = "auto-download-whisper-model")]
-    {
-        let config = resolve_managed_whisper_model_config(config, &config_dir);
-        if is_managed_model_path(&config.whisper_model, &config_dir) {
-            ensure_managed_whisper_model().await?;
-        }
-        Ok(config)
+    let config = resolve_managed_whisper_model_config(config, &config_dir);
+    if is_managed_model_path(&config.whisper_model, &config_dir) {
+        ensure_managed_whisper_model().await?;
     }
-
-    #[cfg(not(feature = "auto-download-whisper-model"))]
-    {
-        Ok(config)
-    }
+    Ok(config)
 }
 
 pub fn default_config(config_dir: &Path) -> Config {
@@ -232,12 +216,6 @@ pub fn default_config(config_dir: &Path) -> Config {
     }
 }
 
-#[cfg(not(any(feature = "auto-download-whisper-model", feature = "tui")))]
-fn default_whisper_model(_config_dir: &Path) -> String {
-    "ggml-base.en.bin".to_string()
-}
-
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 fn default_whisper_model(config_dir: &Path) -> String {
     managed_model_path_in_dir(config_dir)
         .to_string_lossy()
@@ -245,28 +223,25 @@ fn default_whisper_model(config_dir: &Path) -> String {
 }
 
 fn default_whisper_bin() -> Option<String> {
-    #[cfg(feature = "embedded-whisper")]
-    {
-        None
-    }
-
-    #[cfg(not(feature = "embedded-whisper"))]
+    #[cfg(feature = "whisper-cli")]
     {
         Some("whisper-cli".to_string())
     }
+
+    #[cfg(not(feature = "whisper-cli"))]
+    {
+        None
+    }
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 pub fn managed_model_filename() -> &'static str {
     MANAGED_MODEL_FILENAME
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 pub fn managed_model_path_in_dir(config_dir: &Path) -> PathBuf {
     config_dir.join(managed_model_filename())
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 pub fn resolve_managed_whisper_model_config(mut config: Config, config_dir: &Path) -> Config {
     if config.whisper_model == managed_model_filename() {
         config.whisper_model = managed_model_path_in_dir(config_dir)
@@ -276,12 +251,10 @@ pub fn resolve_managed_whisper_model_config(mut config: Config, config_dir: &Pat
     config
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
 fn is_managed_model_path(model_path: &str, config_dir: &Path) -> bool {
     model_path == managed_model_path_in_dir(config_dir).to_string_lossy()
 }
 
-#[cfg(feature = "auto-download-whisper-model")]
 pub async fn ensure_managed_whisper_model() -> Result<PathBuf> {
     ensure_managed_whisper_model_with_events(|event| {
         if matches!(event, ModelDownloadEvent::Downloading(_)) {
@@ -291,7 +264,6 @@ pub async fn ensure_managed_whisper_model() -> Result<PathBuf> {
     .await
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 pub async fn ensure_managed_whisper_model_with_events<F>(on_event: F) -> Result<PathBuf>
 where
     F: FnMut(ModelDownloadEvent),
@@ -305,7 +277,7 @@ where
     .await
 }
 
-#[cfg(all(test, feature = "auto-download-whisper-model"))]
+#[cfg(test)]
 async fn ensure_managed_whisper_model_in_dir<F, Fut>(
     config_dir: &Path,
     downloader: F,
@@ -317,7 +289,6 @@ where
     ensure_managed_whisper_model_in_dir_with_events(config_dir, downloader, |_| {}).await
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 async fn ensure_managed_whisper_model_in_dir_with_events<F, Fut, R>(
     config_dir: &Path,
     downloader: F,
@@ -370,7 +341,6 @@ where
     Ok(model_path)
 }
 
-#[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
 async fn download_managed_whisper_model(download_path: PathBuf) -> Result<()> {
     let response = reqwest::get(MANAGED_MODEL_URL)
         .await
@@ -483,6 +453,20 @@ mod tests {
         assert!(result.exists());
     }
 
+    #[cfg(not(feature = "whisper-cli"))]
+    #[test]
+    fn default_config_uses_embedded_backend_and_managed_model_path() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let cfg = default_config(temp.path());
+
+        assert!(cfg.whisper_bin.is_none());
+        assert_eq!(
+            cfg.whisper_model,
+            managed_model_path_in_dir(temp.path()).to_string_lossy()
+        );
+    }
+
     #[test]
     fn validate_setup_rejects_placeholder_api_key() {
         let temp = tempfile::tempdir().unwrap();
@@ -500,6 +484,30 @@ mod tests {
         let error = validate_setup(&cfg).unwrap_err();
 
         assert!(error.to_string().contains("OpenRouter API key is required"));
+    }
+
+    #[cfg(feature = "whisper-cli")]
+    #[test]
+    fn validate_setup_requires_whisper_bin_for_cli_backend() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_path = temp.path().join("model.bin");
+        std::fs::write(&model_path, b"model").unwrap();
+        let cfg = Config {
+            whisper_bin: None,
+            whisper_model: model_path.to_string_lossy().into_owned(),
+            openrouter_api_key: "sk-or-test".into(),
+            model: "some/model".into(),
+            sample_rate: 16000,
+            output_dir: Some(temp.path().join("out").to_string_lossy().into_owned()),
+        };
+
+        let error = validate_setup(&cfg).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("whisper_bin is required when the whisper-cli backend is enabled")
+        );
     }
 
     #[test]
@@ -570,7 +578,6 @@ mod tests {
         );
     }
 
-    #[cfg(any(feature = "auto-download-whisper-model", feature = "tui"))]
     #[test]
     fn model_download_events_format_user_visible_messages() {
         let path = PathBuf::from("/tmp/scribe/ggml-base.en.bin");
@@ -589,7 +596,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "auto-download-whisper-model")]
     mod managed_model {
         use super::*;
         use std::cell::Cell;
