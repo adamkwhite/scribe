@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tray_item::TrayItem;
 
-use crate::{audio, config, opener, process_recording, prompt_session_name_gui};
+use scribe_core::{audio, config, opener, process_recording};
 
 enum TrayEvent {
     StartRecording,
@@ -105,6 +105,22 @@ fn create_default_icon() -> tray_item::IconSource {
 
         tray_item::IconSource::RawIcon(hicon)
     }
+}
+
+/// Prompt for a session name via Windows input dialog.
+fn prompt_session_name_gui() -> Option<String> {
+    let script = r#"
+Add-Type -AssemblyName Microsoft.VisualBasic
+$name = [Microsoft.VisualBasic.Interaction]::InputBox("Enter a name for this recording (or leave blank):", "Scribe — New Recording", "")
+Write-Output $name
+"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
 }
 
 pub async fn run(cfg: config::Config) -> Result<()> {

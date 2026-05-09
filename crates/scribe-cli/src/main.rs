@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use scribe::{audio, config, process_recording};
+use scribe_core::{audio, config, process_recording};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

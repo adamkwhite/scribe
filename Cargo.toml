@@ -1,5 +1,10 @@
 [workspace]
-members = ["crates/scribe", "crates/scribe-cli", "crates/scribe-tui"]
+members = [
+    "crates/scribe",
+    "crates/scribe-cli",
+    "crates/scribe-core",
+    "crates/scribe-tui",
+]
 resolver = "3"
 
 [workspace.package]
@@ -8,8 +13,6 @@ edition = "2024"
 description = "Local meeting transcription and note generation"
 
 [workspace.dependencies]
-scribe = { path = "crates/scribe" }
-scribe-cli = { path = "crates/scribe-cli" }
-scribe-tui = { path = "crates/scribe-tui" }
+scribe-core = { path = "crates/scribe-core" }
 anyhow = { version = "=1.0.102" }
 tokio = { version = "=1.52.3", features = ["full"] }

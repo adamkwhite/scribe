@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 description.workspace = true
 
+[features]
+default = []
+embedded-whisper = ["scribe-core/embedded-whisper"]
+auto-download-whisper-model = ["scribe-core/auto-download-whisper-model"]
+
 [dependencies]
 anyhow = { workspace = true }
-scribe = { workspace = true }
+scribe-core = { workspace = true }
 tokio = { workspace = true }

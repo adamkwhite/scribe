@@ -26,7 +26,7 @@ Local meeting transcription and note generation. Records system audio, transcrib
 Build with the optional embedded backend:
 
 ```sh
-cargo build --release --features embedded-whisper
+cargo build --release -p scribe-cli --features embedded-whisper
 ```
 
 This uses the `whisper-rs` bindings, which build `whisper.cpp` during Cargo's native build. The built binary no longer needs `whisper-cli` on the host, but the build machine needs native build tools such as CMake and a C/C++ toolchain, and the app still needs a `whisper_model` path:
@@ -42,7 +42,7 @@ The optional `auto-download-whisper-model` feature manages `ggml-base.en.bin`
 under the same directory as the application config:
 
 ```sh
-cargo build --release --features auto-download-whisper-model
+cargo build --release -p scribe-cli --features auto-download-whisper-model
 ```
 
 When enabled, Scribe downloads the model on first startup if it is missing from
@@ -54,9 +54,12 @@ or validating it.
 Scribe now ships separate binaries for each interface:
 
 - `scribe` starts the Windows system tray app. On macOS/Linux it prints guidance
-  and exits because the tray UI is Windows-only.
-- `scribe-cli` starts the interactive terminal CLI.
-- `scribe-tui` starts the Ratatui terminal UI when built with the `tui` feature.
+  and exits because the tray UI is Windows-only. The tray app depends on
+  `scribe-core` for shared recording, transcription, notes, config, and folder
+  opening behavior.
+- `scribe-cli` starts the interactive terminal CLI backed by `scribe-core`.
+- `scribe-tui` starts the Ratatui terminal UI backed by `scribe-core` when built
+  with the `tui` feature.
 
 ### CLI
 
@@ -80,3 +83,12 @@ cargo run -p scribe-tui --features tui
 The TUI provides first-run setup, session browsing, recording, processing
 progress, and folder-opening actions. Without the `tui` feature, the
 `scribe-tui` binary target is not built.
+
+Shared implementation code lives in the `scribe-core` library crate. Interface
+crates expose pass-through features for the shared implementation where useful,
+for example:
+
+```sh
+cargo run -p scribe-cli --features embedded-whisper
+cargo run -p scribe-tui --features tui,embedded-whisper
+```

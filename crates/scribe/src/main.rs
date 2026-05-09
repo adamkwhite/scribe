@@ -1,11 +1,14 @@
 use anyhow::Result;
 
+#[cfg(target_os = "windows")]
+mod tray;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        let cfg = scribe::config::load_or_create().await?;
-        return scribe::tray::run(cfg).await;
+        let cfg = scribe_core::config::load_or_create().await?;
+        return tray::run(cfg).await;
     }
 
     #[cfg(not(target_os = "windows"))]

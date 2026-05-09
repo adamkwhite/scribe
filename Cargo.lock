@@ -2169,6 +2169,27 @@ name = "scribe"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "scribe-core",
+ "tokio",
+ "tray-item",
+ "windows 0.58.0",
+ "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "scribe-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "scribe-core",
+ "tokio",
+]
+
+[[package]]
+name = "scribe-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
  "chrono",
  "cpal",
  "dirs",
@@ -2179,19 +2200,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
- "tray-item",
  "whisper-rs",
- "windows 0.58.0",
- "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "scribe-cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "scribe",
- "tokio",
 ]
 
 [[package]]
@@ -2202,7 +2211,7 @@ dependencies = [
  "chrono",
  "crossterm",
  "ratatui",
- "scribe",
+ "scribe-core",
  "tokio",
 ]
 

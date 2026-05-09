@@ -1,44 +1,18 @@
 [package]
 name = "scribe"
-version = "0.1.0"
-edition = "2024"
-description = "Local meeting transcription and note generation"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
 
 [features]
 default = []
-embedded-whisper = ["dep:whisper-rs"]
-auto-download-whisper-model = []
-tui = []
+embedded-whisper = ["scribe-core/embedded-whisper"]
+auto-download-whisper-model = ["scribe-core/auto-download-whisper-model"]
 
 [dependencies]
-tokio = { workspace = true }
-
-# HTTP client for OpenRouter API
-reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "=1.0.228", features = ["derive"] }
-serde_json = { version = "=1.0.149" }
-
-# Audio capture (WASAPI loopback on Windows)
-cpal = { version = "=0.15.3" }
-
-# WAV file writing
-hound = { version = "=3.5.1" }
-
-# Optional in-process whisper.cpp integration
-whisper-rs = { version = "=0.16.0", default-features = false, optional = true }
-
-# Config
-dirs = { version = "=6.0.0" }
-toml = { version = "=0.8.23" }
-
-# Error handling
 anyhow = { workspace = true }
-
-# Timestamps for filenames
-chrono = { version = "=0.4.44" }
-
-[dev-dependencies]
-tempfile = { version = "=3.27.0" }
+scribe-core = { workspace = true }
+tokio = { workspace = true }
 
 [target.'cfg(windows)'.dependencies]
 tray-item = { version = "=0.10.0" }

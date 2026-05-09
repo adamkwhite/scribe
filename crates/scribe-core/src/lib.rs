@@ -3,8 +3,6 @@ pub mod config;
 pub mod notes;
 pub mod opener;
 pub mod transcribe;
-#[cfg(target_os = "windows")]
-pub mod tray;
 
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -40,21 +38,4 @@ pub async fn process_session(cfg: &config::Config, session_dir: &Path) -> Result
     println!("Notes saved to: {}", notes_path.display());
 
     Ok(())
-}
-
-/// Prompt for a session name via Windows input dialog.
-#[cfg(target_os = "windows")]
-pub fn prompt_session_name_gui() -> Option<String> {
-    let script = r#"
-Add-Type -AssemblyName Microsoft.VisualBasic
-$name = [Microsoft.VisualBasic.Interaction]::InputBox("Enter a name for this recording (or leave blank):", "Scribe — New Recording", "")
-Write-Output $name
-"#;
-    let output = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", script])
-        .output()
-        .ok()?;
-
-    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if name.is_empty() { None } else { Some(name) }
 }

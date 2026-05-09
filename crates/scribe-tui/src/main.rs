@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use scribe::{audio, config, notes, opener, transcribe};
+use scribe_core::{audio, config, notes, opener, transcribe};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
