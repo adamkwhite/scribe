@@ -4,7 +4,6 @@ use std::path::Path;
 use super::output_dir::effective_output_dir;
 use super::settings::Config;
 
-#[cfg_attr(not(feature = "tui"), allow(dead_code))]
 pub fn validate_setup(cfg: &Config) -> Result<()> {
     let key = cfg.openrouter_api_key.trim();
     if key.is_empty() || key == "YOUR_KEY_HERE" {
@@ -111,9 +110,8 @@ mod tests {
         assert!(error.to_string().contains("Whisper model does not exist"));
     }
 
-    #[cfg(feature = "tui")]
     #[test]
-    fn tui_setup_accepts_managed_model_filename_next_to_config() {
+    fn setup_accepts_managed_model_filename_next_to_config() {
         use super::super::managed_model::resolve_managed_whisper_model_config;
 
         let temp = tempfile::tempdir().unwrap();

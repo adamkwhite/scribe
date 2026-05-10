@@ -8,7 +8,6 @@ description.workspace = true
 default = ["__embedded-whisper"]
 __embedded-whisper = ["dep:whisper-rs"]
 whisper-cli = []
-tui = []
 
 [dependencies]
 tokio = { workspace = true }

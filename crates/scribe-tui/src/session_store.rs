@@ -2,6 +2,8 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
+use crate::utils::sessions;
+
 pub const ARCHIVE_DIR_NAME: &str = "archive";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -137,7 +139,7 @@ fn unique_destination(archive_root: &Path, name: &std::ffi::OsStr) -> PathBuf {
 }
 
 fn renamed_session_dir_name(current_name: &str, new_name: &str) -> String {
-    if scribe_core::audio::recorded_at_from_session_name(current_name).is_some()
+    if sessions::recorded_at_from_session_name(current_name).is_some()
         && let Some(prefix) = current_name.get(..17)
     {
         return format!("{prefix} — {new_name}");

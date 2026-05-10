@@ -21,6 +21,9 @@ use unicode_width::UnicodeWidthStr;
 
 mod playback;
 mod session_store;
+mod utils;
+
+use utils::sessions;
 
 const ACTION_PANEL_WIDTH: u16 = 32;
 const FOOTER_HEIGHT: u16 = 3;
@@ -172,7 +175,7 @@ struct App {
     cfg: Option<config::Config>,
     log_path: Option<PathBuf>,
     setup: SetupForm,
-    sessions: Vec<audio::SessionEntry>,
+    sessions: Vec<sessions::SessionEntry>,
     selected_session: usize,
     recording_name: String,
     recording: Option<RecordingState>,
@@ -182,7 +185,7 @@ struct App {
     processing_rx: Option<mpsc::UnboundedReceiver<ProcessingEvent>>,
     message: String,
     selected_detail_action: usize,
-    detail_session: Option<audio::SessionEntry>,
+    detail_session: Option<sessions::SessionEntry>,
     text_viewer: Option<TextViewerState>,
     playback: Option<playback::PlaybackViewState>,
     pending_session_action: Option<PendingSessionAction>,
@@ -432,7 +435,7 @@ fn handle_error_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 impl App {
     fn load(log_path: Option<PathBuf>) -> Result<Self> {
         cleanup_archive_on_startup();
-        let cfg = config::load_existing()?;
+        let cfg = utils::config::load_existing_config()?;
         let setup = SetupForm::from_config(cfg.as_ref());
         let mut app = Self {
             screen: Screen::Setup,
@@ -511,7 +514,7 @@ impl App {
         let cfg =
             config::resolve_managed_whisper_model_config(self.setup.to_config()?, &config_dir);
         config::validate_setup(&cfg)?;
-        config::save(&cfg)?;
+        utils::config::save_config(&cfg)?;
         tracing::info!("TUI setup saved");
         self.cfg = Some(cfg);
         self.reload_sessions();
@@ -530,7 +533,7 @@ impl App {
 
     fn reload_sessions(&mut self) {
         if let Some(cfg) = &self.cfg {
-            match config::effective_output_dir(cfg).and_then(|dir| audio::list_sessions(&dir)) {
+            match config::effective_output_dir(cfg).and_then(|dir| sessions::list_sessions(&dir)) {
                 Ok(sessions) => {
                     self.sessions = sessions;
                     if self.selected_session >= self.sessions.len() {
@@ -589,7 +592,7 @@ impl App {
         Ok(())
     }
 
-    fn detail_session(&self) -> Option<&audio::SessionEntry> {
+    fn detail_session(&self) -> Option<&sessions::SessionEntry> {
         self.detail_session.as_ref()
     }
 
@@ -680,12 +683,12 @@ impl App {
             new_session_dir = %renamed_path.display(),
             "TUI renamed session"
         );
-        self.detail_session = Some(audio::SessionEntry {
+        self.detail_session = Some(sessions::SessionEntry {
             path: renamed_path,
             name: new_name.clone(),
             status: session.status,
             modified,
-            recorded_at: audio::recorded_at_from_session_name(&new_name),
+            recorded_at: sessions::recorded_at_from_session_name(&new_name),
         });
         self.reload_sessions();
         self.message = "Session renamed.".to_string();
@@ -1778,7 +1781,7 @@ fn model_status(path: &str) -> &'static str {
 fn detail_action_line(
     action: DetailAction,
     selected: bool,
-    session: &audio::SessionEntry,
+    session: &sessions::SessionEntry,
 ) -> Line<'static> {
     let (label, shortcut, enabled) = match action {
         DetailAction::Notes => ("Notes", "n", session.path.join("notes.md").exists()),
@@ -1890,7 +1893,7 @@ fn format_time(time: SystemTime) -> String {
 }
 
 fn editable_session_name(name: &str) -> String {
-    if audio::recorded_at_from_session_name(name).is_some()
+    if sessions::recorded_at_from_session_name(name).is_some()
         && let Some(prefix) = name.get(..17)
     {
         let user_prefix = format!("{prefix} — ");
@@ -2008,12 +2011,12 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
 
         let mut app = test_app(Screen::Sessions);
-        app.sessions = vec![audio::SessionEntry {
+        app.sessions = vec![sessions::SessionEntry {
             path: session.clone(),
             name: "2026-05-08_164949 — Test 1".to_string(),
             status: audio::SessionStatus::Empty,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+            recorded_at: sessions::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
         }];
 
         let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
@@ -2042,12 +2045,12 @@ mod tests {
         std::fs::write(session.join("notes.md"), "line 1\nline 2").unwrap();
 
         let mut app = test_app(Screen::SessionDetail);
-        app.detail_session = Some(audio::SessionEntry {
+        app.detail_session = Some(sessions::SessionEntry {
             path: session,
             name: "2026-05-08_164949 — Test 1".to_string(),
             status: audio::SessionStatus::NotesReady,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+            recorded_at: sessions::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
         });
 
         let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
@@ -2066,12 +2069,12 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
 
         let mut app = test_app(Screen::SessionDetail);
-        app.detail_session = Some(audio::SessionEntry {
+        app.detail_session = Some(sessions::SessionEntry {
             path: session,
             name: "2026-05-08_164949 — Test 1".to_string(),
             status: audio::SessionStatus::RecordingOnly,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+            recorded_at: sessions::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
         });
 
         let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
@@ -2148,12 +2151,12 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
 
         let mut app = test_app(Screen::SessionDetail);
-        app.detail_session = Some(audio::SessionEntry {
+        app.detail_session = Some(sessions::SessionEntry {
             path: session.clone(),
             name: "2026-05-08_164949 — Test 1".to_string(),
             status: audio::SessionStatus::RecordingOnly,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+            recorded_at: sessions::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
         });
 
         tokio_test_handle_key(&mut app, KeyCode::Char('d')).unwrap();
@@ -2179,12 +2182,12 @@ mod tests {
         std::fs::write(session.join("transcript.txt"), "hello").unwrap();
 
         let mut app = test_app(Screen::SessionDetail);
-        app.detail_session = Some(audio::SessionEntry {
+        app.detail_session = Some(sessions::SessionEntry {
             path: session.clone(),
             name: "2026-05-08_164949 — Test 1".to_string(),
             status: audio::SessionStatus::TranscriptReady,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+            recorded_at: sessions::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
         });
 
         app.archive_detail_session_to(&archive).unwrap();
@@ -2214,12 +2217,12 @@ mod tests {
         std::fs::create_dir_all(&session).unwrap();
 
         let mut app = test_app(Screen::EditSessionName);
-        app.detail_session = Some(audio::SessionEntry {
+        app.detail_session = Some(sessions::SessionEntry {
             path: session.clone(),
             name: "2026-05-08_164949 — Test 1".to_string(),
             status: audio::SessionStatus::Empty,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+            recorded_at: sessions::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
         });
         app.recording_name = "Team standup".to_string();
 
@@ -2360,13 +2363,13 @@ mod tests {
         }
     }
 
-    fn test_session_entry(name: &str) -> audio::SessionEntry {
-        audio::SessionEntry {
+    fn test_session_entry(name: &str) -> sessions::SessionEntry {
+        sessions::SessionEntry {
             path: PathBuf::from(name),
             name: name.to_string(),
             status: audio::SessionStatus::Empty,
             modified: SystemTime::UNIX_EPOCH,
-            recorded_at: audio::recorded_at_from_session_name(name),
+            recorded_at: sessions::recorded_at_from_session_name(name),
         }
     }
 

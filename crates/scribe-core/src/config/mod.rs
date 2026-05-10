@@ -17,8 +17,6 @@ pub use managed_model::{
 pub use model_download_event::ModelDownloadEvent;
 pub use output_dir::effective_output_dir;
 pub use paths::{config_dir, config_path};
-#[cfg(feature = "tui")]
-pub use persistence::{load_existing, save};
 pub use persistence::{load_from_path, save_to_path};
 pub use settings::Config;
 pub use validate_setup::validate_setup;

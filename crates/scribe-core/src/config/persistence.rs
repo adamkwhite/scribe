@@ -1,42 +1,13 @@
 use anyhow::{Context, Result};
 use std::path::Path;
-#[cfg(feature = "tui")]
-use std::path::PathBuf;
 
-#[cfg(feature = "tui")]
-use super::managed_model::resolve_managed_whisper_model_config;
-#[cfg(feature = "tui")]
-use super::paths::config_path;
 use super::settings::Config;
-
-#[cfg(feature = "tui")]
-pub fn load_existing() -> Result<Option<Config>> {
-    let path = config_path()?;
-    if path.exists() {
-        let config_dir = path
-            .parent()
-            .context("Config path has no parent directory")?
-            .to_path_buf();
-        load_from_path(&path)
-            .map(|config| resolve_managed_whisper_model_config(config, &config_dir))
-            .map(Some)
-    } else {
-        Ok(None)
-    }
-}
 
 pub fn load_from_path(path: &Path) -> Result<Config> {
     tracing::info!(config_path = %path.display(), "loading config");
     let contents = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read {}", path.display()))?;
     toml::from_str(&contents).with_context(|| format!("Failed to parse {}", path.display()))
-}
-
-#[cfg(feature = "tui")]
-pub fn save(cfg: &Config) -> Result<PathBuf> {
-    let path = config_path()?;
-    save_to_path(&path, cfg)?;
-    Ok(path)
 }
 
 pub fn save_to_path(path: &Path, cfg: &Config) -> Result<()> {
