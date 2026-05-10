@@ -17,9 +17,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
+use unicode_width::UnicodeWidthStr;
 
 mod playback;
 mod session_store;
+
+const ACTION_PANEL_WIDTH: u16 = 32;
+const FOOTER_HEIGHT: u16 = 3;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,6 +37,7 @@ enum Screen {
     SessionDetail,
     TextViewer,
     Playback,
+    EditSessionName,
     NewRecording,
     Recording,
     Processing,
@@ -95,15 +100,17 @@ enum DetailAction {
     Transcript,
     Playback,
     OpenFolder,
+    Rename,
     Archive,
     Delete,
 }
 
-const DETAIL_ACTIONS: [DetailAction; 6] = [
+const DETAIL_ACTIONS: [DetailAction; 7] = [
     DetailAction::Notes,
     DetailAction::Transcript,
     DetailAction::Playback,
     DetailAction::OpenFolder,
+    DetailAction::Rename,
     DetailAction::Archive,
     DetailAction::Delete,
 ];
@@ -119,6 +126,13 @@ struct TextViewerState {
     path: PathBuf,
     lines: Vec<String>,
     scroll: usize,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct WorkScreenLayout {
+    main: Rect,
+    actions: Rect,
+    footer: Rect,
 }
 
 impl TextViewerState {
@@ -154,6 +168,7 @@ impl TextViewerState {
 
 struct App {
     screen: Screen,
+    setup_return_screen: Option<Screen>,
     cfg: Option<config::Config>,
     log_path: Option<PathBuf>,
     setup: SetupForm,
@@ -223,6 +238,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         Screen::SessionDetail => handle_session_detail_key(app, key),
         Screen::TextViewer => handle_text_viewer_key(app, key),
         Screen::Playback => handle_playback_key(app, key),
+        Screen::EditSessionName => handle_edit_session_name_key(app, key),
         Screen::NewRecording => handle_new_recording_key(app, key).await,
         Screen::Recording => handle_recording_key(app, key).await,
         Screen::Processing => Ok(false),
@@ -233,7 +249,7 @@ async fn handle_key(app: &mut App, key: KeyEvent) -> Result<bool> {
 
 async fn handle_setup_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     match key.code {
-        KeyCode::Esc => return Ok(true),
+        KeyCode::Esc => return Ok(app.close_setup()),
         KeyCode::Tab | KeyCode::Down => app.setup.focus = next_setup_focus(app.setup.focus),
         KeyCode::BackTab | KeyCode::Up => app.setup.focus = previous_setup_focus(app.setup.focus),
         KeyCode::Backspace => app.setup.delete_char(),
@@ -262,10 +278,12 @@ fn handle_sessions_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Enter | KeyCode::Char('o') => app.open_selected_session_detail(),
         KeyCode::Char('r') => {
             app.recording_name.clear();
+            app.message.clear();
             app.screen = Screen::NewRecording;
         }
         KeyCode::Char('s') => {
             app.setup = SetupForm::from_config(app.cfg.as_ref());
+            app.setup_return_screen = Some(app.screen.clone());
             app.screen = Screen::Setup;
         }
         KeyCode::Char('f') => app.reload_sessions(),
@@ -297,6 +315,7 @@ fn handle_session_detail_key(app: &mut App, key: KeyEvent) -> Result<bool> {
         KeyCode::Char('n') => app.open_text_artifact("notes.md", "Notes")?,
         KeyCode::Char('t') => app.open_text_artifact("transcript.txt", "Transcript")?,
         KeyCode::Char('p') => app.open_playback_view(),
+        KeyCode::Char('e') => app.open_edit_session_name(),
         KeyCode::Char('a') => app.request_session_action(PendingSessionAction::Archive),
         KeyCode::Char('d') => app.request_session_action(PendingSessionAction::Delete),
         KeyCode::Char('q') => return Ok(true),
@@ -341,13 +360,37 @@ fn handle_playback_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     Ok(false)
 }
 
+fn handle_edit_session_name_key(app: &mut App, key: KeyEvent) -> Result<bool> {
+    match key.code {
+        KeyCode::Esc => {
+            app.message.clear();
+            app.screen = Screen::SessionDetail;
+        }
+        KeyCode::Backspace => {
+            app.recording_name.pop();
+            app.message.clear();
+        }
+        KeyCode::Char(ch) => {
+            app.recording_name.push(ch);
+            app.message.clear();
+        }
+        KeyCode::Enter => app.rename_detail_session()?,
+        _ => {}
+    }
+    Ok(false)
+}
+
 async fn handle_new_recording_key(app: &mut App, key: KeyEvent) -> Result<bool> {
     match key.code {
         KeyCode::Esc => app.screen = Screen::Sessions,
         KeyCode::Backspace => {
             app.recording_name.pop();
+            app.message.clear();
         }
-        KeyCode::Char(ch) => app.recording_name.push(ch),
+        KeyCode::Char(ch) => {
+            app.recording_name.push(ch);
+            app.message.clear();
+        }
         KeyCode::Enter => app.start_recording().await?,
         _ => {}
     }
@@ -393,6 +436,7 @@ impl App {
         let setup = SetupForm::from_config(cfg.as_ref());
         let mut app = Self {
             screen: Screen::Setup,
+            setup_return_screen: None,
             cfg,
             log_path,
             setup,
@@ -471,8 +515,17 @@ impl App {
         tracing::info!("TUI setup saved");
         self.cfg = Some(cfg);
         self.reload_sessions();
-        self.screen = Screen::Sessions;
+        self.screen = self.setup_return_screen.take().unwrap_or(Screen::Sessions);
         Ok(())
+    }
+
+    fn close_setup(&mut self) -> bool {
+        if let Some(screen) = self.setup_return_screen.take() {
+            self.screen = screen;
+            false
+        } else {
+            true
+        }
     }
 
     fn reload_sessions(&mut self) {
@@ -529,6 +582,7 @@ impl App {
             DetailAction::Transcript => self.open_text_artifact("transcript.txt", "Transcript")?,
             DetailAction::Playback => self.open_playback_view(),
             DetailAction::OpenFolder => self.open_detail_session_folder()?,
+            DetailAction::Rename => self.open_edit_session_name(),
             DetailAction::Archive => self.request_session_action(PendingSessionAction::Archive),
             DetailAction::Delete => self.request_session_action(PendingSessionAction::Delete),
         }
@@ -588,6 +642,55 @@ impl App {
         tracing::info!(recording_path = %path.display(), "TUI opening playback view");
         self.message.clear();
         self.screen = Screen::Playback;
+    }
+
+    fn open_edit_session_name(&mut self) {
+        let Some(session) = self.detail_session() else {
+            return;
+        };
+        self.recording_name = editable_session_name(&session.name);
+        self.pending_session_action = None;
+        self.message.clear();
+        self.screen = Screen::EditSessionName;
+    }
+
+    fn rename_detail_session(&mut self) -> Result<()> {
+        let name = match session_store::validate_session_name(&self.recording_name) {
+            Ok(name) => name.to_string(),
+            Err(error) => {
+                self.message = error.to_string();
+                return Ok(());
+            }
+        };
+        let Some(session) = self.detail_session.clone() else {
+            return Ok(());
+        };
+
+        self.stop_playback();
+        let renamed_path = session_store::rename_session(&session.path, &name)?;
+        let new_name = renamed_path
+            .file_name()
+            .map(|name| name.to_string_lossy().into_owned())
+            .unwrap_or(name);
+        let modified = std::fs::metadata(&renamed_path)
+            .and_then(|metadata| metadata.modified())
+            .unwrap_or(session.modified);
+        tracing::info!(
+            old_session_dir = %session.path.display(),
+            new_session_dir = %renamed_path.display(),
+            "TUI renamed session"
+        );
+        self.detail_session = Some(audio::SessionEntry {
+            path: renamed_path,
+            name: new_name.clone(),
+            status: session.status,
+            modified,
+            recorded_at: audio::recorded_at_from_session_name(&new_name),
+        });
+        self.reload_sessions();
+        self.message = "Session renamed.".to_string();
+        self.screen = Screen::SessionDetail;
+        Ok(())
     }
 
     fn toggle_playback(&mut self) {
@@ -650,11 +753,10 @@ impl App {
         self.pending_session_action = Some(action);
         self.message = match action {
             PendingSessionAction::Archive => {
-                "Archive this session? Press y to confirm or n/Esc to cancel.".to_string()
+                "Archive this session? Press y to confirm or n to cancel.".to_string()
             }
             PendingSessionAction::Delete => {
-                "Delete this session permanently? Press y to confirm or n/Esc to cancel."
-                    .to_string()
+                "Delete this session permanently? Press y to confirm or n to cancel.".to_string()
             }
         };
     }
@@ -725,14 +827,15 @@ impl App {
     }
 
     async fn start_recording(&mut self) -> Result<()> {
-        let cfg = self.cfg.as_ref().context("Scribe is not configured")?;
-        let trimmed_name = self.recording_name.trim();
-        let name = if trimmed_name.is_empty() {
-            None
-        } else {
-            Some(trimmed_name)
+        let name = match session_store::validate_session_name(&self.recording_name) {
+            Ok(name) => name.to_string(),
+            Err(error) => {
+                self.message = error.to_string();
+                return Ok(());
+            }
         };
-        let session_dir = audio::create_session_dir(cfg, name)?;
+        let cfg = self.cfg.as_ref().context("Scribe is not configured")?;
+        let session_dir = audio::create_session_dir(cfg, Some(&name))?;
         tracing::info!(session_dir = %session_dir.display(), "TUI recording session created");
         let recording = Arc::new(AtomicBool::new(true));
         let recording_for_task = recording.clone();
@@ -1087,6 +1190,10 @@ fn render(frame: &mut Frame<'_>, app: &App) {
         Screen::SessionDetail => render_session_detail(frame, app),
         Screen::TextViewer => render_text_viewer(frame, app),
         Screen::Playback => render_playback(frame, app),
+        Screen::EditSessionName => {
+            render_session_detail(frame, app);
+            render_edit_session_name(frame, app);
+        }
         Screen::NewRecording => {
             render_sessions(frame, app);
             render_new_recording(frame, app);
@@ -1100,10 +1207,11 @@ fn render(frame: &mut Frame<'_>, app: &App) {
 
 fn render_setup(frame: &mut Frame<'_>, app: &App) {
     let area = centered_rect(88, 70, frame.area());
+    let masked_key = mask_key(&app.setup.openrouter_api_key);
     let lines = vec![
         field_line(
             "OpenRouter API key",
-            &mask_key(&app.setup.openrouter_api_key),
+            &masked_key,
             app.setup.focus == SetupFocus::ApiKey,
         ),
         field_line(
@@ -1153,6 +1261,9 @@ fn render_setup(frame: &mut Frame<'_>, app: &App) {
             .wrap(Wrap { trim: true }),
         area,
     );
+    if let Some((line_index, value)) = setup_cursor_value(&app.setup, &masked_key) {
+        frame.set_cursor_position(input_cursor_position(area, line_index, 18, value));
+    }
 }
 
 fn whisper_backend_label() -> &'static str {
@@ -1168,11 +1279,7 @@ fn whisper_backend_label() -> &'static str {
 }
 
 fn render_sessions(frame: &mut Frame<'_>, app: &App) {
-    let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(45), Constraint::Length(20)])
-        .split(area);
+    let layout = split_work_screen(frame.area());
 
     let sessions = if app.sessions.is_empty() {
         vec![ListItem::new("No sessions yet.")]
@@ -1199,7 +1306,7 @@ fn render_sessions(frame: &mut Frame<'_>, app: &App) {
 
     frame.render_widget(
         List::new(sessions).block(Block::default().title(" Sessions ").borders(Borders::ALL)),
-        chunks[0],
+        layout.main,
     );
 
     let output = app
@@ -1208,33 +1315,24 @@ fn render_sessions(frame: &mut Frame<'_>, app: &App) {
         .and_then(|cfg| config::effective_output_dir(cfg).ok())
         .map(|path| path.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let actions = vec![
-        Line::from("[ r ] Record"),
-        Line::from("[ f ] Refresh"),
-        Line::from("[ s ] Settings"),
-        Line::from("[ o/Enter ] Details"),
-        Line::from("[ q ] Quit"),
-        Line::from(""),
-        Line::from("Enter opens detail"),
-        Line::from("Up/Down select"),
-        Line::from(""),
-        Line::from(format!("Output: {output}")),
-        Line::from(app.message.clone()),
-    ];
+    let actions = session_action_texts()
+        .into_iter()
+        .map(Line::from)
+        .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(actions)
-            .block(Block::default().title(" Actions ").borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
-        chunks[1],
+        Paragraph::new(actions).block(Block::default().title(" Actions ").borders(Borders::ALL)),
+        layout.actions,
+    );
+    render_footer(
+        frame,
+        layout.footer,
+        footer_text(format!("Output: {output}"), &app.message),
     );
 }
 
 fn render_session_detail(frame: &mut Frame<'_>, app: &App) {
     let area = frame.area();
-    let chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Min(45), Constraint::Length(28)])
-        .split(area);
+    let layout = split_work_screen(area);
     let Some(session) = &app.detail_session else {
         frame.render_widget(
             Paragraph::new(vec![
@@ -1279,9 +1377,6 @@ fn render_session_detail(frame: &mut Frame<'_>, app: &App) {
             "Recording     {}",
             available_text(recording_path.exists())
         )),
-        Line::from(""),
-        Line::from(app.message.clone()),
-        confirmation_line(app.pending_session_action),
     ];
     frame.render_widget(
         Paragraph::new(details)
@@ -1291,7 +1386,7 @@ fn render_session_detail(frame: &mut Frame<'_>, app: &App) {
                     .borders(Borders::ALL),
             )
             .wrap(Wrap { trim: true }),
-        chunks[0],
+        layout.main,
     );
 
     let actions = DETAIL_ACTIONS
@@ -1302,10 +1397,16 @@ fn render_session_detail(frame: &mut Frame<'_>, app: &App) {
         })
         .collect::<Vec<_>>();
     frame.render_widget(
-        Paragraph::new(actions)
-            .block(Block::default().title(" Actions ").borders(Borders::ALL))
-            .wrap(Wrap { trim: true }),
-        chunks[1],
+        Paragraph::new(actions).block(Block::default().title(" Actions ").borders(Borders::ALL)),
+        layout.actions,
+    );
+    render_footer(
+        frame,
+        layout.footer,
+        footer_text(
+            app.message.clone(),
+            confirmation_text(app.pending_session_action),
+        ),
     );
 }
 
@@ -1331,7 +1432,7 @@ fn render_text_viewer(frame: &mut Frame<'_>, app: &App) {
         .map(Line::from)
         .collect::<Vec<_>>();
     let footer = format!(
-        "{} | lines {}-{} of {} | Up/Down PageUp/PageDown Home/End g/G | Esc back",
+        "{} | lines {}-{} of {} | j/k scroll | PgUp/PgDn page | g/G ends | Esc back",
         viewer.path.display(),
         if viewer.lines.is_empty() {
             0
@@ -1388,7 +1489,7 @@ fn render_playback(frame: &mut Frame<'_>, app: &App) {
         Line::from(format!("Status      {status}")),
         Line::from(""),
         Line::from("[ Space ] Play/Pause    [ r ] Restart    [ s ] Stop"),
-        Line::from("[ Left/h ] -10s         [ Right/l ] +30s"),
+        Line::from("[ h ] -10s              [ l ] +30s"),
         Line::from("[ Esc ] Back"),
     ];
     if let Some(error) = &playback.error {
@@ -1410,6 +1511,8 @@ fn render_new_recording(frame: &mut Frame<'_>, app: &App) {
             Line::from("Session name"),
             Line::from(format!("[ {} ]", app.recording_name)),
             Line::from(""),
+            Line::from(app.message.clone()),
+            Line::from(""),
             Line::from("[ Enter ] Start recording    [ Esc ] Cancel"),
         ])
         .block(
@@ -1419,6 +1522,30 @@ fn render_new_recording(frame: &mut Frame<'_>, app: &App) {
         ),
         area,
     );
+    frame.set_cursor_position(input_cursor_position(area, 1, 0, &app.recording_name));
+}
+
+fn render_edit_session_name(frame: &mut Frame<'_>, app: &App) {
+    let area = centered_rect(52, 28, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from("Session name"),
+            Line::from(format!("[ {} ]", app.recording_name)),
+            Line::from(""),
+            Line::from(app.message.clone()),
+            Line::from(""),
+            Line::from("[ Enter ] Save name    [ Esc ] Cancel"),
+        ])
+        .block(
+            Block::default()
+                .title(" Rename Session ")
+                .borders(Borders::ALL),
+        )
+        .wrap(Wrap { trim: true }),
+        area,
+    );
+    frame.set_cursor_position(input_cursor_position(area, 1, 0, &app.recording_name));
 }
 
 fn render_recording(frame: &mut Frame<'_>, app: &App) {
@@ -1490,7 +1617,7 @@ fn render_complete(frame: &mut Frame<'_>, app: &App) {
             Line::from(""),
             Line::from(path),
             Line::from(""),
-            Line::from("[ Enter/v ] View    [ b/Esc ] Back to sessions    [ q ] Quit"),
+            Line::from("[ v ] View    [ b ] Back to sessions    [ q ] Quit"),
         ])
         .block(
             Block::default()
@@ -1517,12 +1644,46 @@ fn render_error(frame: &mut Frame<'_>, app: &App) {
             Line::from(""),
             Line::from(format!("Log: {log_path}")),
             Line::from(""),
-            Line::from("[ b/Esc ] Back to sessions    [ q ] Quit"),
+            Line::from("[ b ] Back to sessions    [ q ] Quit"),
         ])
         .block(Block::default().title(" Error ").borders(Borders::ALL))
         .wrap(Wrap { trim: true }),
         area,
     );
+}
+
+fn split_work_screen(area: Rect) -> WorkScreenLayout {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(1), Constraint::Length(FOOTER_HEIGHT)])
+        .split(area);
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(45), Constraint::Length(ACTION_PANEL_WIDTH)])
+        .split(vertical[0]);
+    WorkScreenLayout {
+        main: top[0],
+        actions: top[1],
+        footer: vertical[1],
+    }
+}
+
+fn render_footer(frame: &mut Frame<'_>, area: Rect, text: String) {
+    frame.render_widget(
+        Paragraph::new(text).block(Block::default().title(" Messages ").borders(Borders::ALL)),
+        area,
+    );
+}
+
+fn footer_text(primary: impl Into<String>, secondary: &str) -> String {
+    let primary = primary.into();
+    if primary.is_empty() {
+        secondary.to_string()
+    } else if secondary.is_empty() {
+        primary
+    } else {
+        format!("{primary}    {secondary}")
+    }
 }
 
 fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
@@ -1537,6 +1698,35 @@ fn field_line(label: &str, value: &str, focused: bool) -> Line<'static> {
         Span::raw(format!("{label:<18}")),
         Span::styled(format!("[ {value} ]"), style),
     ])
+}
+
+fn setup_cursor_value<'a>(setup: &'a SetupForm, masked_key: &'a str) -> Option<(usize, &'a str)> {
+    match setup.focus {
+        SetupFocus::ApiKey => Some((0, masked_key)),
+        SetupFocus::NotesModel => Some((1, setup.model.as_str())),
+        SetupFocus::WhisperBin => Some((3, setup.whisper_bin.as_str())),
+        SetupFocus::WhisperModel => Some((4, setup.whisper_model.as_str())),
+        SetupFocus::OutputDir => Some((5, setup.output_dir.as_str())),
+        _ => None,
+    }
+}
+
+fn input_cursor_position(
+    area: Rect,
+    line_index: usize,
+    field_prefix_width: u16,
+    value: &str,
+) -> (u16, u16) {
+    let value_width = UnicodeWidthStr::width(value) as u16;
+    let inner_left = area.x.saturating_add(1);
+    let inner_right = area.x.saturating_add(area.width.saturating_sub(2));
+    let x = inner_left
+        .saturating_add(field_prefix_width)
+        .saturating_add(2)
+        .saturating_add(value_width)
+        .min(inner_right);
+    let y = area.y.saturating_add(1).saturating_add(line_index as u16);
+    (x, y)
 }
 
 fn actions_line(actions: &[(&str, bool)]) -> Line<'static> {
@@ -1557,6 +1747,16 @@ fn actions_line(actions: &[(&str, bool)]) -> Line<'static> {
         })
         .collect::<Vec<_>>();
     Line::from(spans)
+}
+
+fn session_action_texts() -> [&'static str; 5] {
+    [
+        "[ r ] Record",
+        "[ f ] Refresh",
+        "[ s ] Settings",
+        "[ o ] Details",
+        "[ q ] Quit",
+    ]
 }
 
 fn mask_key(key: &str) -> String {
@@ -1589,6 +1789,7 @@ fn detail_action_line(
         ),
         DetailAction::Playback => ("Playback", "p", session.path.join("recording.wav").exists()),
         DetailAction::OpenFolder => ("Open Folder", "o", true),
+        DetailAction::Rename => ("Rename", "e", true),
         DetailAction::Archive => ("Archive", "a", true),
         DetailAction::Delete => ("Delete", "d", true),
     };
@@ -1609,15 +1810,11 @@ fn detail_action_line(
     ))
 }
 
-fn confirmation_line(action: Option<PendingSessionAction>) -> Line<'static> {
+fn confirmation_text(action: Option<PendingSessionAction>) -> &'static str {
     match action {
-        Some(PendingSessionAction::Archive) => {
-            Line::from("Confirm archive: [ y/Enter ] yes  [ n/Esc ] no")
-        }
-        Some(PendingSessionAction::Delete) => {
-            Line::from("Confirm delete: [ y/Enter ] yes  [ n/Esc ] no")
-        }
-        None => Line::from(""),
+        Some(PendingSessionAction::Archive) => "Confirm archive: [ y ] Yes  [ n ] No",
+        Some(PendingSessionAction::Delete) => "Confirm delete: [ y ] Yes  [ n ] No",
+        None => "",
     }
 }
 
@@ -1692,6 +1889,16 @@ fn format_time(time: SystemTime) -> String {
     datetime.format("%Y-%m-%d %H:%M").to_string()
 }
 
+fn editable_session_name(name: &str) -> String {
+    if audio::recorded_at_from_session_name(name).is_some()
+        && let Some(prefix) = name.get(..17)
+    {
+        let user_prefix = format!("{prefix} — ");
+        return name.strip_prefix(&user_prefix).unwrap_or("").to_string();
+    }
+    name.to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1711,6 +1918,27 @@ mod tests {
         let cfg = form.to_config().unwrap();
 
         assert!(cfg.whisper_bin.is_none());
+    }
+
+    #[test]
+    fn escape_from_initial_setup_quits_tui() {
+        let mut app = test_app(Screen::Setup);
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
+
+        assert!(quit);
+        assert_eq!(app.screen, Screen::Setup);
+    }
+
+    #[test]
+    fn escape_from_in_app_settings_returns_to_previous_screen() {
+        let mut app = test_app(Screen::Sessions);
+
+        tokio_test_handle_key(&mut app, KeyCode::Char('s')).unwrap();
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Esc).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::Sessions);
     }
 
     #[test]
@@ -1854,6 +2082,33 @@ mod tests {
     }
 
     #[test]
+    fn new_recording_rejects_empty_session_name() {
+        let mut app = test_app(Screen::NewRecording);
+        app.recording_name = "   ".to_string();
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::NewRecording);
+        assert_eq!(app.message, "Session name cannot be empty");
+    }
+
+    #[test]
+    fn new_recording_rejects_non_printable_session_name() {
+        let mut app = test_app(Screen::NewRecording);
+        app.recording_name = "Team\tStandup".to_string();
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::NewRecording);
+        assert_eq!(
+            app.message,
+            "Session name must use printable Unicode characters"
+        );
+    }
+
+    #[test]
     fn escape_from_text_viewer_returns_to_detail() {
         let mut app = test_app(Screen::TextViewer);
         app.text_viewer = Some(TextViewerState::new(
@@ -1941,6 +2196,62 @@ mod tests {
     }
 
     #[test]
+    fn detail_rename_opens_edit_prompt_with_user_visible_name() {
+        let mut app = test_app(Screen::SessionDetail);
+        app.detail_session = Some(test_session_entry("2026-05-08_164949 — Test 1"));
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Char('e')).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::EditSessionName);
+        assert_eq!(app.recording_name, "Test 1");
+    }
+
+    #[test]
+    fn edit_session_name_renames_folder_and_returns_to_detail() {
+        let temp = tempfile::tempdir().unwrap();
+        let session = temp.path().join("2026-05-08_164949 — Test 1");
+        std::fs::create_dir_all(&session).unwrap();
+
+        let mut app = test_app(Screen::EditSessionName);
+        app.detail_session = Some(audio::SessionEntry {
+            path: session.clone(),
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::Empty,
+            modified: SystemTime::UNIX_EPOCH,
+            recorded_at: audio::recorded_at_from_session_name("2026-05-08_164949 — Test 1"),
+        });
+        app.recording_name = "Team standup".to_string();
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::SessionDetail);
+        let renamed = temp.path().join("2026-05-08_164949 — Team standup");
+        assert!(!session.exists());
+        assert!(renamed.exists());
+        let detail = app.detail_session.as_ref().unwrap();
+        assert_eq!(detail.path, renamed);
+        assert_eq!(detail.name, "2026-05-08_164949 — Team standup");
+    }
+
+    #[test]
+    fn edit_session_name_reuses_session_name_validation() {
+        let mut app = test_app(Screen::EditSessionName);
+        app.detail_session = Some(test_session_entry("2026-05-08_164949 — Test 1"));
+        app.recording_name = "\u{7}".to_string();
+
+        let quit = tokio_test_handle_key(&mut app, KeyCode::Enter).unwrap();
+
+        assert!(!quit);
+        assert_eq!(app.screen, Screen::EditSessionName);
+        assert_eq!(
+            app.message,
+            "Session name must use printable Unicode characters"
+        );
+    }
+
+    #[test]
     fn pending_detail_action_can_be_cancelled() {
         let mut app = test_app(Screen::SessionDetail);
         app.request_session_action(PendingSessionAction::Archive);
@@ -1983,9 +2294,52 @@ mod tests {
         );
     }
 
+    #[test]
+    fn input_cursor_position_points_after_value() {
+        let area = Rect::new(10, 5, 80, 12);
+
+        let position = input_cursor_position(area, 1, 18, "Standup");
+
+        assert_eq!(position, (38, 7));
+    }
+
+    #[test]
+    fn input_cursor_position_clamps_to_inner_width() {
+        let area = Rect::new(0, 0, 24, 5);
+
+        let position = input_cursor_position(area, 0, 18, "long session name");
+
+        assert_eq!(position, (22, 1));
+    }
+
+    #[test]
+    fn work_screen_layout_uses_wider_action_panel_and_footer() {
+        let area = Rect::new(0, 0, 100, 40);
+
+        let layout = split_work_screen(area);
+
+        assert_eq!(layout.main, Rect::new(0, 0, 68, 37));
+        assert_eq!(layout.actions, Rect::new(68, 0, ACTION_PANEL_WIDTH, 37));
+        assert_eq!(layout.footer, Rect::new(0, 37, 100, FOOTER_HEIGHT));
+    }
+
+    #[test]
+    fn session_action_texts_use_single_key_shortcuts() {
+        let actions = session_action_texts();
+
+        assert!(actions.contains(&"[ o ] Details"));
+        assert!(actions.iter().all(|action| !action.contains('/')));
+        assert!(
+            actions
+                .iter()
+                .all(|action| UnicodeWidthStr::width(*action) <= ACTION_PANEL_WIDTH as usize - 2)
+        );
+    }
+
     fn test_app(screen: Screen) -> App {
         App {
             screen,
+            setup_return_screen: None,
             cfg: None,
             log_path: None,
             setup: SetupForm::from_config(None),

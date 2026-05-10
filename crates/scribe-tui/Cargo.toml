@@ -23,6 +23,7 @@ rodio = { version = "=0.21.1", default-features = false, features = ["playback",
 scribe-core = { workspace = true, default-features = false }
 tokio = { workspace = true }
 tracing = { workspace = true }
+unicode-width = "=0.2.2"
 
 [dev-dependencies]
 filetime = { version = "=0.2.26" }

@@ -11,10 +11,25 @@ pub struct PlaybackController {
     duration: Option<Duration>,
 }
 
+trait OutputStreamDropLog {
+    fn set_log_on_drop(&mut self, enabled: bool);
+}
+
+impl OutputStreamDropLog for rodio::OutputStream {
+    fn set_log_on_drop(&mut self, enabled: bool) {
+        self.log_on_drop(enabled);
+    }
+}
+
+fn disable_output_stream_drop_log(stream: &mut impl OutputStreamDropLog) {
+    stream.set_log_on_drop(false);
+}
+
 impl PlaybackController {
     pub fn open(path: &Path) -> Result<Self> {
-        let stream = rodio::OutputStreamBuilder::open_default_stream()
+        let mut stream = rodio::OutputStreamBuilder::open_default_stream()
             .context("Failed to open default audio output")?;
+        disable_output_stream_drop_log(&mut stream);
         let sink = rodio::Sink::connect_new(stream.mixer());
         sink.pause();
 
@@ -196,5 +211,24 @@ mod tests {
     fn empty_sink_requires_source_reload_before_replay() {
         assert!(source_needs_reload(true));
         assert!(!source_needs_reload(false));
+    }
+
+    #[test]
+    fn tui_output_stream_drop_log_is_disabled() {
+        struct FakeOutputStream {
+            log_on_drop: bool,
+        }
+
+        impl OutputStreamDropLog for FakeOutputStream {
+            fn set_log_on_drop(&mut self, enabled: bool) {
+                self.log_on_drop = enabled;
+            }
+        }
+
+        let mut stream = FakeOutputStream { log_on_drop: true };
+
+        disable_output_stream_drop_log(&mut stream);
+
+        assert!(!stream.log_on_drop);
     }
 }
