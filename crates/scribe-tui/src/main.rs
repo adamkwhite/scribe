@@ -10,6 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
+use scribe_core::notes::NotesGenerator;
 use scribe_core::{audio, config, logging, notes, opener, transcribe};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
@@ -1003,8 +1004,16 @@ fn spawn_processing_task(
 
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::GeneratingNotes));
         tracing::info!(session_dir = %session_dir.display(), "TUI notes generation starting");
-        let notes_text = match notes::generate(&transcript, &cfg).await {
-            Ok(notes) => notes,
+        let notes_generator = notes::OpenRouterNotesGenerator::from_config(&cfg);
+        let notes_input = notes::NoteGenerationInput {
+            transcript: transcript.clone(),
+            context: notes::NoteGenerationContext {
+                note_date: chrono::Local::now().format("%B %-d, %Y").to_string(),
+                system_prompt: notes::NotesSystemPrompt::Default,
+            },
+        };
+        let notes_text = match notes_generator.generate(notes_input).await {
+            Ok(notes_output) => notes_output.markdown,
             Err(error) => {
                 tracing::error!(
                     error = %error,

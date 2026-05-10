@@ -1,6 +1,11 @@
 mod chat_request;
 mod chat_response;
-mod generate;
+mod generator;
 mod message;
+mod open_router;
 
-pub use generate::generate;
+pub use generator::{
+    NoteGenerationContext, NoteGenerationFuture, NoteGenerationInput, NoteGenerationOutput,
+    NotesGenerator, NotesSystemPrompt,
+};
+pub use open_router::OpenRouterNotesGenerator;

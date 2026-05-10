@@ -1,5 +1,6 @@
 use crate::{config, notes, transcribe};
 use anyhow::Context;
+use notes::NotesGenerator;
 use std::path::Path;
 
 /// Process a specific session: transcribe + generate notes.
@@ -45,8 +46,16 @@ pub async fn process_session(cfg: &config::Config, session_dir: &Path) -> anyhow
 
     println!("Generating meeting notes...");
     tracing::info!(session_dir = %session_dir.display(), "notes generation starting");
-    let notes_text = match notes::generate(&transcript, cfg).await {
-        Ok(notes_text) => notes_text,
+    let notes_generator = notes::OpenRouterNotesGenerator::from_config(cfg);
+    let notes_input = notes::NoteGenerationInput {
+        transcript: transcript.clone(),
+        context: notes::NoteGenerationContext {
+            note_date: chrono::Local::now().format("%B %-d, %Y").to_string(),
+            system_prompt: notes::NotesSystemPrompt::Default,
+        },
+    };
+    let notes_text = match notes_generator.generate(notes_input).await {
+        Ok(notes_output) => notes_output.markdown,
         Err(error) => {
             tracing::error!(
                 error = %error,
