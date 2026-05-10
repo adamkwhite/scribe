@@ -4,8 +4,9 @@ Local meeting transcription and note generation. Records system audio, transcrib
 
 ## Prerequisites
 
-- Native build tools such as CMake and a C/C++ toolchain for the default embedded Whisper backend
+- Native build tools such as CMake and a C/C++ toolchain for the embedded Whisper backend
 - A whisper model file (e.g., `ggml-base.en.bin`) — provide a path in config or let Scribe download the managed base English model
+- Optional: `whisper-cli` from whisper.cpp when you want to override the embedded backend
 - [OpenRouter](https://openrouter.ai/) API key
 
 ## Setup
@@ -34,16 +35,10 @@ under the same directory as the application config on first startup. Later runs
 reuse the existing file without re-downloading it. The TUI setup screen also has
 a Download model action for this managed path.
 
-### External whisper.cpp CLI
+### External whisper.cpp CLI override
 
-Build with the opt-out `whisper-cli` backend when you want to use an installed
-whisper.cpp executable instead of the embedded backend:
-
-```sh
-cargo build --release -p scribe-cli --no-default-features --features whisper-cli
-```
-
-Configure the executable path in addition to the model:
+Set `whisper_bin` when you want Scribe to use an installed whisper.cpp
+executable instead of embedded Whisper:
 
 ```toml
 whisper_bin = "C:/path/to/whisper-cli.exe"
@@ -86,13 +81,10 @@ The TUI provides first-run setup, session browsing, recording, processing
 progress, and folder-opening actions. Without the `tui` feature, the
 `scribe-tui` binary target is not built.
 
-Shared implementation code lives in the `scribe-core` library crate. Interface
-crates expose pass-through features for the shared implementation where useful,
-for example:
+Shared implementation code lives in the `scribe-core` library crate. Common run
+commands:
 
 ```sh
 cargo run -p scribe-cli
-cargo run -p scribe-cli --no-default-features --features whisper-cli
 cargo run -p scribe-tui --features tui
-cargo run -p scribe-tui --no-default-features --features tui,whisper-cli
 ```

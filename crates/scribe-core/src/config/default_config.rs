@@ -21,22 +21,13 @@ fn default_whisper_model(config_dir: &Path) -> String {
 }
 
 fn default_whisper_bin() -> Option<String> {
-    #[cfg(feature = "whisper-cli")]
-    {
-        Some("whisper-cli".to_string())
-    }
-
-    #[cfg(not(feature = "whisper-cli"))]
-    {
-        None
-    }
+    None
 }
 
-#[cfg(all(test, not(feature = "whisper-cli")))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
-    #[cfg(not(feature = "whisper-cli"))]
     #[test]
     fn default_config_uses_embedded_backend_and_managed_model_path() {
         let temp = tempfile::tempdir().unwrap();

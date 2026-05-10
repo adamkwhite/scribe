@@ -1,13 +1,5 @@
-#[cfg(any(
-    test,
-    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
-))]
 const WHISPER_SAMPLE_RATE: u32 = 16_000;
 
-#[cfg(any(
-    test,
-    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
-))]
 pub(super) fn resample_to_16khz(samples: &[f32], source_rate: u32) -> Vec<f32> {
     if source_rate == WHISPER_SAMPLE_RATE || samples.is_empty() {
         return samples.to_vec();

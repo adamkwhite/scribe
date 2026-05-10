@@ -4,10 +4,6 @@ version.workspace = true
 edition.workspace = true
 description.workspace = true
 
-[features]
-default = ["scribe-core/default"]
-whisper-cli = ["scribe-core/whisper-cli"]
-
 [dependencies]
 anyhow = { workspace = true }
 scribe-core = { workspace = true, default-features = false }

@@ -5,9 +5,7 @@ edition.workspace = true
 description.workspace = true
 
 [features]
-default = ["scribe-core/default"]
 tui = ["dep:crossterm", "dep:ratatui", "dep:rodio"]
-whisper-cli = ["scribe-core/whisper-cli"]
 
 [[bin]]
 name = "scribe-tui"

@@ -11,8 +11,14 @@ pub async fn process_session(cfg: &config::Config, session_dir: &Path) -> anyhow
 
     println!("Transcribing with whisper.cpp...");
     tracing::info!(wav_path = %wav_path.display(), "transcription starting");
-    let transcript = match transcribe::run_whisper(&wav_path, cfg).await {
-        Ok(transcript) => transcript,
+    let transcription_provider = transcribe::transcription_provider_from_config(cfg)?;
+    let transcript = match transcription_provider
+        .transcribe(transcribe::TranscriptionInput {
+            wav_path: wav_path.clone(),
+        })
+        .await
+    {
+        Ok(output) => output.transcript,
         Err(error) => {
             tracing::error!(
                 error = %error,

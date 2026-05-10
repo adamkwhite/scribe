@@ -4,11 +4,6 @@ version.workspace = true
 edition.workspace = true
 description.workspace = true
 
-[features]
-default = ["__embedded-whisper"]
-__embedded-whisper = ["dep:whisper-rs"]
-whisper-cli = []
-
 [dependencies]
 tokio = { workspace = true }
 
@@ -23,8 +18,8 @@ cpal = { version = "=0.15.3" }
 # WAV file writing
 hound = { version = "=3.5.1" }
 
-# Optional in-process whisper.cpp integration
-whisper-rs = { version = "=0.16.0", default-features = false, optional = true }
+# In-process whisper.cpp integration
+whisper-rs = { version = "=0.16.0", default-features = false }
 
 # Config
 dirs = { version = "=6.0.0" }

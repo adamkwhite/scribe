@@ -1,24 +1,9 @@
-#[cfg(any(
-    test,
-    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
-))]
 use anyhow::{Context, Result};
-#[cfg(any(
-    test,
-    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
-))]
 use std::path::Path;
 
-#[cfg(any(
-    test,
-    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
-))]
 use super::resample::resample_to_16khz;
 
-#[cfg(any(
-    test,
-    all(not(feature = "whisper-cli"), feature = "__embedded-whisper")
-))]
+#[allow(dead_code)]
 pub(super) fn load_wav_as_mono_16khz_f32(wav_path: &Path) -> Result<Vec<f32>> {
     let reader = hound::WavReader::open(wav_path)
         .with_context(|| format!("Failed to open {}", wav_path.display()))?;

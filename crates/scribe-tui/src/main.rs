@@ -971,8 +971,26 @@ fn spawn_processing_task(
             wav_path = %wav_path.display(),
             "TUI transcription starting"
         );
-        let transcript = match transcribe::run_whisper(&wav_path, &cfg).await {
-            Ok(transcript) => transcript,
+        let transcription_provider = match transcribe::transcription_provider_from_config(&cfg) {
+            Ok(provider) => provider,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    session_dir = %session_dir.display(),
+                    wav_path = %wav_path.display(),
+                    "TUI transcription provider setup failed"
+                );
+                let _ = tx.send(ProcessingEvent::Error(error.to_string()));
+                return;
+            }
+        };
+        let transcript = match transcription_provider
+            .transcribe(transcribe::TranscriptionInput {
+                wav_path: wav_path.clone(),
+            })
+            .await
+        {
+            Ok(output) => output.transcript,
             Err(error) => {
                 tracing::error!(
                     error = %error,
@@ -1156,15 +1174,7 @@ impl SetupForm {
 }
 
 fn default_setup_whisper_bin() -> Option<String> {
-    #[cfg(feature = "whisper-cli")]
-    {
-        Some("whisper-cli".to_string())
-    }
-
-    #[cfg(not(feature = "whisper-cli"))]
-    {
-        None
-    }
+    None
 }
 
 fn next_setup_focus(focus: SetupFocus) -> SetupFocus {
@@ -1231,7 +1241,10 @@ fn render_setup(frame: &mut Frame<'_>, app: &App) {
             &app.setup.model,
             app.setup.focus == SetupFocus::NotesModel,
         ),
-        Line::from(format!("Whisper backend    {}", whisper_backend_label())),
+        Line::from(format!(
+            "Whisper backend    {}",
+            whisper_backend_label(&app.setup)
+        )),
         field_line(
             "whisper_bin",
             &app.setup.whisper_bin,
@@ -1278,15 +1291,11 @@ fn render_setup(frame: &mut Frame<'_>, app: &App) {
     }
 }
 
-fn whisper_backend_label() -> &'static str {
-    #[cfg(feature = "whisper-cli")]
-    {
-        "whisper.cpp CLI"
-    }
-
-    #[cfg(not(feature = "whisper-cli"))]
-    {
+fn whisper_backend_label(setup: &SetupForm) -> &'static str {
+    if setup.whisper_bin.trim().is_empty() {
         "embedded whisper.cpp"
+    } else {
+        "whisper.cpp CLI"
     }
 }
 

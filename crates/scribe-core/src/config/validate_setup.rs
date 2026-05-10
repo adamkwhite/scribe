@@ -14,19 +14,6 @@ pub fn validate_setup(cfg: &Config) -> Result<()> {
         anyhow::bail!("Notes model is required");
     }
 
-    #[cfg(feature = "whisper-cli")]
-    {
-        if cfg
-            .whisper_bin
-            .as_deref()
-            .map(str::trim)
-            .filter(|bin| !bin.is_empty())
-            .is_none()
-        {
-            anyhow::bail!("whisper_bin is required when the whisper-cli backend is enabled");
-        }
-    }
-
     let model_path = Path::new(&cfg.whisper_model);
     if !model_path.exists() {
         anyhow::bail!("Whisper model does not exist: {}", model_path.display());
@@ -65,28 +52,23 @@ mod tests {
         assert!(error.to_string().contains("OpenRouter API key is required"));
     }
 
-    #[cfg(feature = "whisper-cli")]
     #[test]
-    fn validate_setup_requires_whisper_bin_for_cli_backend() {
+    fn validate_setup_accepts_missing_whisper_bin_for_embedded_default() {
         let temp = tempfile::tempdir().unwrap();
         let model_path = temp.path().join("model.bin");
+        let output_dir = temp.path().join("out");
         std::fs::write(&model_path, b"model").unwrap();
+        std::fs::create_dir(&output_dir).unwrap();
         let cfg = Config {
             whisper_bin: None,
             whisper_model: model_path.to_string_lossy().into_owned(),
             openrouter_api_key: "sk-or-test".into(),
             model: "some/model".into(),
             sample_rate: 16000,
-            output_dir: Some(temp.path().join("out").to_string_lossy().into_owned()),
+            output_dir: Some(output_dir.to_string_lossy().into_owned()),
         };
 
-        let error = validate_setup(&cfg).unwrap_err();
-
-        assert!(
-            error
-                .to_string()
-                .contains("whisper_bin is required when the whisper-cli backend is enabled")
-        );
+        validate_setup(&cfg).unwrap();
     }
 
     #[test]

@@ -27,9 +27,6 @@ pub async fn load_or_create() -> Result<Config> {
 
         println!("Created config at: {}", path.display());
         println!("Please edit it with your whisper model path and OpenRouter API key.");
-        #[cfg(feature = "whisper-cli")]
-        println!("Set whisper_bin to your whisper.cpp executable path.\n");
-        #[cfg(not(feature = "whisper-cli"))]
         println!();
 
         config
