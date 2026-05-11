@@ -10,7 +10,7 @@ async fn main() -> Result<()> {
 
     #[cfg(target_os = "windows")]
     {
-        let cfg = scribe_core::config::load_or_create().await?;
+        let cfg = scribe_core::config::load_or_create()?;
         return tray::run(cfg).await;
     }
 

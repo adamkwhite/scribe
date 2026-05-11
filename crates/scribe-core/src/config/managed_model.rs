@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncWriteExt;
 
 use super::model_download_event::ModelDownloadEvent;
 use super::paths::config_dir;
@@ -26,10 +27,6 @@ pub fn resolve_managed_whisper_model_config(mut config: Config, config_dir: &Pat
             .into_owned();
     }
     config
-}
-
-pub(super) fn is_managed_model_path(model_path: &str, config_dir: &Path) -> bool {
-    model_path == managed_model_path_in_dir(config_dir).to_string_lossy()
 }
 
 pub async fn ensure_managed_whisper_model() -> Result<PathBuf> {
@@ -119,18 +116,32 @@ where
 }
 
 async fn download_managed_whisper_model(download_path: PathBuf) -> Result<()> {
-    let response = reqwest::get(MANAGED_MODEL_URL)
+    download_managed_whisper_model_from_url(MANAGED_MODEL_URL, download_path).await
+}
+
+async fn download_managed_whisper_model_from_url(url: &str, download_path: PathBuf) -> Result<()> {
+    let mut response = reqwest::get(url)
         .await
         .context("Failed to start Whisper model download")?
         .error_for_status()
         .context("Whisper model download returned an error status")?;
-    let bytes = response
-        .bytes()
+    let mut file = tokio::fs::File::create(&download_path)
         .await
-        .context("Failed to read Whisper model download")?;
-    tokio::fs::write(&download_path, bytes)
+        .with_context(|| format!("Failed to create {}", download_path.display()))?;
+
+    while let Some(chunk) = response
+        .chunk()
         .await
-        .with_context(|| format!("Failed to write {}", download_path.display()))?;
+        .context("Failed to read Whisper model download")?
+    {
+        file.write_all(&chunk)
+            .await
+            .with_context(|| format!("Failed to write {}", download_path.display()))?;
+    }
+
+    file.flush()
+        .await
+        .with_context(|| format!("Failed to flush {}", download_path.display()))?;
     Ok(())
 }
 
@@ -239,5 +250,33 @@ mod tests {
         let cfg = resolve_managed_whisper_model_config(cfg, temp.path());
 
         assert_eq!(cfg.whisper_model, "/models/custom.bin");
+    }
+
+    #[tokio::test]
+    async fn download_writes_response_chunks_to_file() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/model.bin", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 1024];
+            let _ = stream.read(&mut request).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n",
+                )
+                .unwrap();
+        });
+        let temp = tempfile::tempdir().unwrap();
+        let download_path = temp.path().join("model.bin.download");
+
+        download_managed_whisper_model_from_url(&url, download_path.clone())
+            .await
+            .unwrap();
+        server.join().unwrap();
+
+        assert_eq!(std::fs::read(&download_path).unwrap(), b"hello world");
     }
 }

@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This is a Rust 2024 CLI/tray application for local meeting transcription and note generation. Source lives in `src/`: `main.rs` wires CLI/tray flows, `audio/` records and manages session directories, `config/` loads TOML settings, `transcribe/` shells out to whisper.cpp, `notes/` calls OpenRouter, and `tray.rs` is Windows-only tray UI. Unit tests are colocated in each module under `#[cfg(test)]`. CI configuration lives in `.github/workflows/ci.yml`; `.cargo/config.toml` contains the Windows GNU linker hint. There are no checked-in app assets; recordings, transcripts, and notes are runtime output under the user's documents folder.
+This is a Rust 2024 workspace for local meeting transcription and note generation. Workspace crates live under `crates/`: `scribe-core` owns reusable config, audio recording, transcription, notes, runtime orchestration, logging, and file-opening primitives; `scribe-cli` is the interactive command-line binary; `scribe-tui` is the optional terminal UI behind its `tui` feature; and `scribe` is the Windows tray application. Legacy root `src/` modules have been moved into the workspace crates. Unit tests are colocated in each module under `#[cfg(test)]`, with broader runtime coverage in `crates/scribe-core/tests/`. CI configuration lives in `.github/workflows/ci.yml`. There are no checked-in app assets; recordings, transcripts, and notes are runtime output under the user's documents folder.
 
 ## Build, Test, and Development Commands
 
@@ -11,9 +11,11 @@ This is a Rust 2024 CLI/tray application for local meeting transcription and not
 - `cargo test`: run unit tests.
 - `cargo build`: build a debug binary.
 - `cargo build --release`: build the optimized user-facing binary.
-- `cargo run -- --cli`: run the CLI mode locally. The Windows tray is the default on Windows; non-Windows hosts fall back to CLI mode.
+- `cargo run -p scribe-cli`: run the CLI locally.
+- `cargo run -p scribe-tui --features tui`: run the feature-gated terminal UI.
+- `cargo run -p scribe`: run the Windows tray app on Windows.
 
-CI runs fmt, clippy, build, and tests on Linux and Windows with `RUSTFLAGS=-D warnings`.
+CI runs fmt, clippy, build, tests, and TUI feature checks on Linux and Windows with `RUSTFLAGS=-D warnings`.
 
 ## Coding Style & Naming Conventions
 

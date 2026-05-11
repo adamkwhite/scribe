@@ -30,10 +30,10 @@ whisper_model = "C:/path/to/ggml-base.en.bin"
 openrouter_api_key = "sk-or-..."
 ```
 
-If the config uses the managed model path, Scribe downloads `ggml-base.en.bin`
-under the same directory as the application config on first startup. Later runs
-reuse the existing file without re-downloading it. The TUI setup screen also has
-a Download model action for this managed path.
+If the config uses the managed model path, use the TUI setup screen's Download
+model action to fetch `ggml-base.en.bin` under the same directory as the
+application config. Later runs reuse the existing file without re-downloading
+it. Startup only creates or loads config; it does not begin a model download.
 
 ### External whisper.cpp CLI override
 

@@ -5,7 +5,7 @@ use scribe_core::{audio, config, notes, runtime};
 async fn main() -> Result<()> {
     let log_path = scribe_core::logging::init_file_logging("scribe-cli")?;
     tracing::info!(log_path = %log_path.display(), "scribe CLI starting");
-    let cfg = config::load_or_create().await?;
+    let cfg = config::load_or_create()?;
     let runtime = runtime::ScribeRuntime::from_config(&cfg)?;
     run_cli(runtime).await
 }
