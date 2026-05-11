@@ -5,6 +5,7 @@ pub mod notes;
 pub mod opener;
 mod process_recording;
 mod process_session;
+pub mod runtime;
 pub mod transcribe;
 
 pub use process_recording::process_recording;

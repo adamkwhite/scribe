@@ -10,10 +10,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use scribe_core::notes::NotesGenerator;
-use scribe_core::{audio, config, logging, notes, opener, transcribe};
+use scribe_core::{audio, config, logging, notes, opener, runtime};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
@@ -75,8 +75,7 @@ struct RecordingState {
     session_dir: PathBuf,
     session_name: String,
     started_at: Instant,
-    recording_control: audio::RecordingControl,
-    task: tokio::task::JoinHandle<Result<audio::AudioRecordingOutput>>,
+    active_recording: runtime::ActiveRecording,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -172,6 +171,7 @@ struct App {
     screen: Screen,
     setup_return_screen: Option<Screen>,
     cfg: Option<config::Config>,
+    runtime: Option<Arc<runtime::ScribeRuntime>>,
     log_path: Option<PathBuf>,
     setup: SetupForm,
     sessions: Vec<sessions::SessionEntry>,
@@ -435,11 +435,18 @@ impl App {
     fn load(log_path: Option<PathBuf>) -> Result<Self> {
         cleanup_archive_on_startup();
         let cfg = utils::config::load_existing_config()?;
+        let runtime = cfg
+            .as_ref()
+            .filter(|cfg| config::validate_setup(cfg).is_ok())
+            .map(runtime::ScribeRuntime::from_config)
+            .transpose()?
+            .map(Arc::new);
         let setup = SetupForm::from_config(cfg.as_ref());
         let mut app = Self {
             screen: Screen::Setup,
             setup_return_screen: None,
             cfg,
+            runtime,
             log_path,
             setup,
             sessions: Vec::new(),
@@ -458,11 +465,7 @@ impl App {
             pending_session_action: None,
         };
 
-        if app
-            .cfg
-            .as_ref()
-            .is_some_and(|cfg| config::validate_setup(cfg).is_ok())
-        {
+        if app.runtime.is_some() {
             app.reload_sessions();
             app.screen = Screen::Sessions;
         }
@@ -513,9 +516,11 @@ impl App {
         let cfg =
             config::resolve_managed_whisper_model_config(self.setup.to_config()?, &config_dir);
         config::validate_setup(&cfg)?;
+        let runtime = Arc::new(runtime::ScribeRuntime::from_config(&cfg)?);
         utils::config::save_config(&cfg)?;
         tracing::info!("TUI setup saved");
         self.cfg = Some(cfg);
+        self.runtime = Some(runtime);
         self.reload_sessions();
         self.screen = self.setup_return_screen.take().unwrap_or(Screen::Sessions);
         Ok(())
@@ -531,8 +536,14 @@ impl App {
     }
 
     fn reload_sessions(&mut self) {
-        if let Some(cfg) = &self.cfg {
-            match config::effective_output_dir(cfg).and_then(|dir| sessions::list_sessions(&dir)) {
+        if let Some(runtime) = &self.runtime {
+            match runtime.session_store().list_sessions().map(|output| {
+                output
+                    .sessions
+                    .into_iter()
+                    .map(Into::into)
+                    .collect::<Vec<sessions::SessionEntry>>()
+            }) {
                 Ok(sessions) => {
                     self.sessions = sessions;
                     if self.selected_session >= self.sessions.len() {
@@ -836,34 +847,22 @@ impl App {
                 return Ok(());
             }
         };
-        let cfg = self.cfg.as_ref().context("Scribe is not configured")?;
-        let session_store = audio::audio_session_store_from_config(cfg)?;
-        let session_dir = session_store
-            .create_session(audio::CreateAudioSessionInput {
-                name: Some(name),
-                context: audio::CreateAudioSessionContext {
-                    timestamp: audio::AudioSessionTimestamp::now_local(),
-                },
-            })?
-            .session_dir;
-        tracing::info!(session_dir = %session_dir.display(), "TUI recording session created");
-        let recorder = audio::audio_recorder_from_config(cfg)?;
-        let recording_control = audio::RecordingControl::new_running();
-        let recording_control_for_task = recording_control.clone();
-        let session_for_task = session_dir.clone();
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("Scribe is not configured")?
+            .clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_for_task = tx.clone();
-        let task = tokio::spawn(async move {
-            recorder
-                .record(audio::AudioRecordingInput {
-                    control: recording_control_for_task,
-                    session_dir: session_for_task,
-                    events: audio::AudioRecordingEventSink::custom(move |event| {
-                        let _ = tx_for_task.send(ProcessingEvent::RecordingStatus(event.message()));
-                    }),
-                })
-                .await
-        });
+        let active_recording = runtime.start_recording(runtime::StartRecordingInput {
+            name: Some(name),
+            context: runtime.recording_context_now(),
+            events: audio::AudioRecordingEventSink::custom(move |event| {
+                let _ = tx_for_task.send(ProcessingEvent::RecordingStatus(event.message()));
+            }),
+        })?;
+        let session_dir = active_recording.session_dir().to_path_buf();
+        tracing::info!(session_dir = %session_dir.display(), "TUI recording session created");
 
         self.recording_messages.clear();
         self.processing_rx = Some(rx);
@@ -874,8 +873,7 @@ impl App {
                 .unwrap_or_else(|| "Recording".to_string()),
             session_dir,
             started_at: Instant::now(),
-            recording_control,
-            task,
+            active_recording,
         });
         self.processing_step = ProcessingStep::Finalizing;
         self.message.clear();
@@ -888,21 +886,23 @@ impl App {
         let Some(recording) = self.recording.take() else {
             return Ok(());
         };
-        let Some(cfg) = self.cfg.clone() else {
-            anyhow::bail!("Scribe is not configured");
-        };
+        let runtime = self
+            .runtime
+            .as_ref()
+            .context("Scribe is not configured")?
+            .clone();
 
         self.processing_session = Some(recording.session_dir.clone());
         self.processing_step = ProcessingStep::Finalizing;
         self.screen = Screen::Processing;
-        recording.recording_control.stop();
+        recording.active_recording.stop();
         tracing::info!(
             session_dir = %recording.session_dir.display(),
             "TUI recording stop requested; processing starting"
         );
         let (tx, rx) = mpsc::unbounded_channel();
         self.processing_rx = Some(rx);
-        spawn_processing_task(tx, cfg, recording);
+        spawn_processing_task(tx, runtime, recording);
         Ok(())
     }
 
@@ -945,126 +945,56 @@ impl App {
 
 fn spawn_processing_task(
     tx: mpsc::UnboundedSender<ProcessingEvent>,
-    cfg: config::Config,
+    runtime: Arc<runtime::ScribeRuntime>,
     recording: RecordingState,
 ) {
     tokio::spawn(async move {
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::Finalizing));
         tracing::info!("TUI processing finalizing recording");
-        match recording.task.await {
-            Ok(Ok(output)) => {
+        let session_dir = recording.session_dir;
+        match recording.active_recording.wait().await {
+            Ok(output) => {
                 tracing::info!(wav_path = %output.wav_path.display(), "TUI recording finalized");
             }
-            Ok(Err(error)) => {
+            Err(error) => {
                 tracing::error!(error = %error, "TUI recording finalization failed");
                 let _ = tx.send(ProcessingEvent::Error(error.to_string()));
                 return;
             }
-            Err(error) => {
-                tracing::error!(error = %error, "TUI recording task failed to join");
-                let _ = tx.send(ProcessingEvent::Error(format!(
-                    "Recording task failed to join: {error}"
-                )));
-                return;
-            }
         }
 
-        let session_dir = recording.session_dir;
-        let _ = tx.send(ProcessingEvent::Step(ProcessingStep::Transcribing));
-        let wav_path = session_dir.join("recording.wav");
-        tracing::info!(
-            session_dir = %session_dir.display(),
-            wav_path = %wav_path.display(),
-            "TUI transcription starting"
-        );
-        let transcription_provider = match transcribe::transcription_provider_from_config(&cfg) {
-            Ok(provider) => provider,
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    session_dir = %session_dir.display(),
-                    wav_path = %wav_path.display(),
-                    "TUI transcription provider setup failed"
-                );
-                let _ = tx.send(ProcessingEvent::Error(error.to_string()));
-                return;
-            }
-        };
-        let transcript = match transcription_provider
-            .transcribe(transcribe::TranscriptionInput {
-                wav_path: wav_path.clone(),
+        let tx_for_events = tx.clone();
+        let result = runtime
+            .process_session(runtime::ProcessSessionInput {
+                session_dir,
+                context: runtime.note_generation_context_now(notes::NotesSystemPrompt::Default),
+                events: runtime::SessionProcessingEventSink::custom(move |event| match event {
+                    runtime::SessionProcessingEvent::TranscriptionStarted { .. } => {
+                        let _ =
+                            tx_for_events.send(ProcessingEvent::Step(ProcessingStep::Transcribing));
+                    }
+                    runtime::SessionProcessingEvent::NotesGenerationStarted { .. } => {
+                        let _ = tx_for_events
+                            .send(ProcessingEvent::Step(ProcessingStep::GeneratingNotes));
+                    }
+                    runtime::SessionProcessingEvent::NotesGenerationCompleted { .. } => {
+                        let _ =
+                            tx_for_events.send(ProcessingEvent::Step(ProcessingStep::WritingNotes));
+                    }
+                    _ => {}
+                }),
             })
-            .await
-        {
-            Ok(output) => output.transcript,
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    session_dir = %session_dir.display(),
-                    wav_path = %wav_path.display(),
-                    "TUI transcription failed"
-                );
-                let _ = tx.send(ProcessingEvent::Error(error.to_string()));
-                return;
+            .await;
+
+        match result {
+            Ok(_) => {
+                let _ = tx.send(ProcessingEvent::Complete);
             }
-        };
-        tracing::info!(
-            session_dir = %session_dir.display(),
-            transcript_chars = transcript.len(),
-            "TUI transcription completed"
-        );
-
-        let txt_path = session_dir.join("transcript.txt");
-        if let Err(error) = std::fs::write(&txt_path, &transcript) {
-            tracing::error!(
-                error = %error,
-                transcript_path = %txt_path.display(),
-                "TUI transcript write failed"
-            );
-            let _ = tx.send(ProcessingEvent::Error(error.to_string()));
-            return;
-        }
-        tracing::info!(transcript_path = %txt_path.display(), "TUI transcript saved");
-
-        let _ = tx.send(ProcessingEvent::Step(ProcessingStep::GeneratingNotes));
-        tracing::info!(session_dir = %session_dir.display(), "TUI notes generation starting");
-        let notes_generator = notes::OpenRouterNotesGenerator::from_config(&cfg);
-        let notes_input = notes::NoteGenerationInput {
-            transcript: transcript.clone(),
-            context: notes::NoteGenerationContext {
-                note_date: chrono::Local::now().format("%B %-d, %Y").to_string(),
-                system_prompt: notes::NotesSystemPrompt::Default,
-            },
-        };
-        let notes_text = match notes_generator.generate(notes_input).await {
-            Ok(notes_output) => notes_output.markdown,
             Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    session_dir = %session_dir.display(),
-                    "TUI notes generation failed"
-                );
+                tracing::error!(error = %error, "TUI processing failed");
                 let _ = tx.send(ProcessingEvent::Error(error.to_string()));
-                return;
             }
-        };
-        tracing::info!(session_dir = %session_dir.display(), "TUI notes generation completed");
-
-        let _ = tx.send(ProcessingEvent::Step(ProcessingStep::WritingNotes));
-        let full_notes = format!("{notes_text}\n\n---\n\n## Raw Transcript\n\n{transcript}\n");
-        let notes_path = session_dir.join("notes.md");
-        if let Err(error) = std::fs::write(&notes_path, &full_notes) {
-            tracing::error!(
-                error = %error,
-                notes_path = %notes_path.display(),
-                "TUI notes write failed"
-            );
-            let _ = tx.send(ProcessingEvent::Error(error.to_string()));
-            return;
         }
-        tracing::info!(notes_path = %notes_path.display(), "TUI notes saved");
-
-        let _ = tx.send(ProcessingEvent::Complete);
     });
 }
 
@@ -2368,6 +2298,7 @@ mod tests {
             screen,
             setup_return_screen: None,
             cfg: None,
+            runtime: None,
             log_path: None,
             setup: SetupForm::from_config(None),
             sessions: Vec::new(),

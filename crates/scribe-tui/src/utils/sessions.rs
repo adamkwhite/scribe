@@ -1,8 +1,7 @@
-use anyhow::Result;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::SystemTime;
 
-use scribe_core::audio::{self, AudioSessionStore};
+use scribe_core::audio;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionEntry {
@@ -26,13 +25,6 @@ impl From<audio::SessionEntry> for SessionEntry {
     }
 }
 
-pub fn list_sessions(base_dir: &Path) -> Result<Vec<SessionEntry>> {
-    let store = audio::FileSystemAudioSessionStore::new(base_dir.to_path_buf());
-    store
-        .list_sessions()
-        .map(|output| output.sessions.into_iter().map(Into::into).collect())
-}
-
 pub fn recorded_at_from_session_name(name: &str) -> Option<SystemTime> {
     let prefix = name.get(..17)?;
     let parsed = chrono::NaiveDateTime::parse_from_str(prefix, "%Y-%m-%d_%H%M%S").ok()?;
@@ -43,7 +35,6 @@ pub fn recorded_at_from_session_name(name: &str) -> Option<SystemTime> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
 
     #[test]
     fn parses_recorded_time_from_session_directory_prefix() {
@@ -62,16 +53,14 @@ mod tests {
     }
 
     #[test]
-    fn list_sessions_populates_recorded_at_from_directory_name() {
-        let temp = tempfile::tempdir().unwrap();
-        let base = temp.path();
-        let session = base.join("2026-05-08_164949 — Test 1");
-        fs::create_dir_all(&session).unwrap();
-        fs::write(session.join("recording.wav"), b"fake").unwrap();
+    fn session_entry_from_core_populates_recorded_at_from_directory_name() {
+        let session = SessionEntry::from(audio::SessionEntry {
+            path: PathBuf::from("2026-05-08_164949 — Test 1"),
+            name: "2026-05-08_164949 — Test 1".to_string(),
+            status: audio::SessionStatus::RecordingOnly,
+            modified: SystemTime::UNIX_EPOCH,
+        });
 
-        let sessions = list_sessions(base).unwrap();
-
-        assert_eq!(sessions.len(), 1);
-        assert!(sessions[0].recorded_at.is_some());
+        assert!(session.recorded_at.is_some());
     }
 }

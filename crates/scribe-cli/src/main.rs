@@ -1,17 +1,17 @@
-use anyhow::{Context, Result};
-use scribe_core::{audio, config, process_recording};
+use anyhow::Result;
+use scribe_core::{audio, config, notes, runtime};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let log_path = scribe_core::logging::init_file_logging("scribe-cli")?;
     tracing::info!(log_path = %log_path.display(), "scribe CLI starting");
     let cfg = config::load_or_create().await?;
-    run_cli(cfg).await
+    let runtime = runtime::ScribeRuntime::from_config(&cfg)?;
+    run_cli(runtime).await
 }
 
-async fn run_cli(cfg: config::Config) -> Result<()> {
-    let mut recording_control: Option<audio::RecordingControl> = None;
-    let mut recording_task: Option<tokio::task::JoinHandle<Result<()>>> = None;
+async fn run_cli(runtime: runtime::ScribeRuntime) -> Result<()> {
+    let mut recording: Option<runtime::ActiveRecording> = None;
 
     println!("scribe — meeting transcription & notes");
     println!("Commands: [r]ecord, [s]top, [t]ranscribe last, [q]uit\n");
@@ -24,9 +24,9 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
 
         match line.trim() {
             cmd if cmd.starts_with("r") => {
-                if recording_control
+                if recording
                     .as_ref()
-                    .is_some_and(|control| control.is_recording())
+                    .is_some_and(|recording| recording.is_recording())
                 {
                     tracing::info!("record command ignored because recording is already active");
                     println!("Already recording.");
@@ -45,60 +45,45 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
                     println!("Tip: use 'r Meeting Name' to name your recording.");
                 }
 
-                let session_store = audio::audio_session_store_from_config(&cfg)?;
-                let session_dir = session_store
-                    .create_session(audio::CreateAudioSessionInput {
-                        name,
-                        context: audio::CreateAudioSessionContext {
-                            timestamp: audio::AudioSessionTimestamp::now_local(),
-                        },
-                    })?
-                    .session_dir;
+                let active_recording = runtime.start_recording(runtime::StartRecordingInput {
+                    name,
+                    context: runtime.recording_context_now(),
+                    events: audio::AudioRecordingEventSink::printing(),
+                })?;
+                let session_dir = active_recording.session_dir().to_path_buf();
                 tracing::info!(session_dir = %session_dir.display(), "CLI recording session created");
                 println!("Session: {}", session_dir.display());
-
-                let recorder = audio::audio_recorder_from_config(&cfg)?;
-                let control = audio::RecordingControl::new_running();
-                let input = audio::AudioRecordingInput {
-                    control: control.clone(),
-                    session_dir,
-                    events: audio::AudioRecordingEventSink::printing(),
-                };
-                recording_control = Some(control);
-                recording_task = Some(tokio::spawn(async move {
-                    recorder.record(input).await.map(|_| ())
-                }));
+                recording = Some(active_recording);
                 tracing::info!("CLI recording started");
                 println!("Recording started. Press 's' to stop.");
             }
             "s" | "stop" => {
-                if !recording_control
+                if !recording
                     .as_ref()
-                    .is_some_and(|control| control.is_recording())
+                    .is_some_and(|recording| recording.is_recording())
                 {
                     tracing::info!("stop command ignored because no recording is active");
                     println!("Not recording.");
                     continue;
                 }
-                if let Some(control) = &recording_control {
-                    control.stop();
-                }
+                let active_recording = recording.take().expect("recording presence checked above");
+                let session_dir = active_recording.session_dir().to_path_buf();
+                active_recording.stop();
                 tracing::info!("CLI recording stop requested");
                 println!("Recording stopped. Finalizing...");
-                wait_for_recording_task(&mut recording_task).await?;
-                recording_control = None;
+                active_recording.wait().await?;
                 println!("Processing...");
-                process_recording(&cfg).await?;
+                process_session(&runtime, session_dir).await?;
             }
             "t" | "transcribe" => {
                 tracing::info!("CLI process latest session requested");
-                process_recording(&cfg).await?;
+                process_latest_recording(&runtime).await?;
             }
             "q" | "quit" => {
-                if let Some(control) = &recording_control {
-                    control.stop();
+                if let Some(active_recording) = recording.take() {
+                    active_recording.stop();
+                    active_recording.wait().await?;
                 }
-                wait_for_recording_task(&mut recording_task).await?;
                 tracing::info!("scribe CLI exiting");
                 println!("Bye.");
                 break;
@@ -111,36 +96,28 @@ async fn run_cli(cfg: config::Config) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_recording_task(
-    recording_task: &mut Option<tokio::task::JoinHandle<Result<()>>>,
+async fn process_session(
+    runtime: &runtime::ScribeRuntime,
+    session_dir: std::path::PathBuf,
 ) -> Result<()> {
-    if let Some(task) = recording_task.take() {
-        task.await.context("Recording task failed to join")??;
-    }
+    runtime
+        .process_session(runtime::ProcessSessionInput {
+            session_dir,
+            context: runtime.note_generation_context_now(notes::NotesSystemPrompt::Default),
+            events: runtime::SessionProcessingEventSink::printing(),
+        })
+        .await?;
 
     Ok(())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::time::Duration;
+async fn process_latest_recording(runtime: &runtime::ScribeRuntime) -> Result<()> {
+    runtime
+        .process_latest_recording(runtime::ProcessLatestRecordingInput {
+            context: runtime.note_generation_context_now(notes::NotesSystemPrompt::Default),
+            events: runtime::SessionProcessingEventSink::printing(),
+        })
+        .await?;
 
-    #[tokio::test]
-    async fn wait_for_recording_task_awaits_finalization_before_returning() {
-        let finalized = Arc::new(AtomicBool::new(false));
-        let finalized_in_task = finalized.clone();
-        let mut recording_task = Some(tokio::task::spawn_blocking(move || {
-            std::thread::sleep(Duration::from_millis(25));
-            finalized_in_task.store(true, Ordering::SeqCst);
-            Ok(())
-        }));
-
-        wait_for_recording_task(&mut recording_task).await.unwrap();
-
-        assert!(recording_task.is_none());
-        assert!(finalized.load(Ordering::SeqCst));
-    }
+    Ok(())
 }

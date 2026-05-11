@@ -1,7 +1,7 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tray_item::TrayItem;
 
-use scribe_core::{audio, config, opener, process_recording};
+use scribe_core::{audio, config, notes, opener, runtime};
 
 enum TrayEvent {
     StartRecording,
@@ -122,10 +122,9 @@ Write-Output $name
 }
 
 pub async fn run(cfg: config::Config) -> Result<()> {
+    let scribe_runtime = runtime::ScribeRuntime::from_config(&cfg)?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrayEvent>(4);
-    let mut recording_control: Option<audio::RecordingControl> = None;
-    let mut recording_task: Option<tokio::task::JoinHandle<Result<audio::AudioRecordingOutput>>> =
-        None;
+    let mut recording: Option<runtime::ActiveRecording> = None;
 
     let rt = tokio::runtime::Handle::current();
 
@@ -186,9 +185,9 @@ pub async fn run(cfg: config::Config) -> Result<()> {
     while let Some(event) = rx.recv().await {
         match event {
             TrayEvent::StartRecording => {
-                if recording_control
+                if recording
                     .as_ref()
-                    .is_some_and(|control| control.is_recording())
+                    .is_some_and(|recording| recording.is_recording())
                 {
                     tracing::info!(
                         "tray start command ignored because recording is already active"
@@ -202,81 +201,51 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                     .await
                     .unwrap_or(None);
 
-                let session_store = match audio::audio_session_store_from_config(&cfg) {
-                    Ok(store) => store,
-                    Err(e) => {
-                        tracing::error!(error = %e, "tray failed to create session store");
-                        eprintln!("Failed to create session store: {e}");
-                        continue;
-                    }
-                };
-                let session_dir =
-                    match session_store.create_session(audio::CreateAudioSessionInput {
+                let active_recording =
+                    match scribe_runtime.start_recording(runtime::StartRecordingInput {
                         name,
-                        context: audio::CreateAudioSessionContext {
-                            timestamp: audio::AudioSessionTimestamp::now_local(),
-                        },
+                        context: scribe_runtime.recording_context_now(),
+                        events: audio::AudioRecordingEventSink::printing(),
                     }) {
-                        Ok(output) => output.session_dir,
+                        Ok(recording) => recording,
                         Err(e) => {
                             tracing::error!(error = %e, "tray failed to create recording session");
                             eprintln!("Failed to create session: {e}");
                             continue;
                         }
                     };
+                let session_dir = active_recording.session_dir().to_path_buf();
                 tracing::info!(session_dir = %session_dir.display(), "tray recording session created");
                 println!("Session: {}", session_dir.display());
-
-                let recorder = match audio::audio_recorder_from_config(&cfg) {
-                    Ok(recorder) => recorder,
-                    Err(e) => {
-                        tracing::error!(error = %e, "tray failed to create audio recorder");
-                        eprintln!("Failed to create audio recorder: {e}");
-                        continue;
-                    }
-                };
-                let control = audio::RecordingControl::new_running();
-                let input = audio::AudioRecordingInput {
-                    control: control.clone(),
-                    session_dir,
-                    events: audio::AudioRecordingEventSink::printing(),
-                };
-                recording_control = Some(control);
-                recording_task = Some(tokio::spawn(async move { recorder.record(input).await }));
+                recording = Some(active_recording);
                 tracing::info!("tray recording started");
                 println!("Recording started.");
             }
             TrayEvent::StopRecording => {
-                if !recording_control
+                if !recording
                     .as_ref()
-                    .is_some_and(|control| control.is_recording())
+                    .is_some_and(|recording| recording.is_recording())
                 {
                     tracing::info!("tray stop command ignored because no recording is active");
                     println!("Not recording.");
                     continue;
                 }
-                if let Some(control) = &recording_control {
-                    control.stop();
-                }
+                let active_recording = recording.take().expect("recording presence checked above");
+                let session_dir = active_recording.session_dir().to_path_buf();
+                active_recording.stop();
                 tracing::info!("tray recording stop requested");
                 println!("Recording stopped. Processing...");
-                match wait_for_recording_task(&mut recording_task).await {
-                    Ok(Some(output)) => {
-                        tracing::info!(
-                            wav_path = %output.wav_path.display(),
-                            "tray recording finalized"
-                        );
+                match active_recording.wait().await {
+                    Ok(output) => {
+                        tracing::info!(wav_path = %output.wav_path.display(), "tray recording finalized");
                     }
-                    Ok(None) => {}
                     Err(e) => {
                         tracing::error!(error = %e, "tray recording finalization failed");
                         eprintln!("Recording error: {e}");
-                        recording_control = None;
                         continue;
                     }
                 }
-                recording_control = None;
-                if let Err(e) = process_recording(&cfg).await {
+                if let Err(e) = process_session(&scribe_runtime, session_dir).await {
                     tracing::error!(error = %e, "tray processing failed");
                     eprintln!("Processing error: {e}");
                 }
@@ -294,11 +263,11 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                 }
             }
             TrayEvent::Quit => {
-                if let Some(control) = &recording_control {
-                    control.stop();
-                }
-                if let Err(e) = wait_for_recording_task(&mut recording_task).await {
-                    tracing::error!(error = %e, "tray recording finalization failed during quit");
+                if let Some(active_recording) = recording.take() {
+                    active_recording.stop();
+                    if let Err(e) = active_recording.wait().await {
+                        tracing::error!(error = %e, "tray recording finalization failed during quit");
+                    }
                 }
                 tracing::info!("scribe tray exiting");
                 println!("Bye.");
@@ -310,14 +279,17 @@ pub async fn run(cfg: config::Config) -> Result<()> {
     Ok(())
 }
 
-async fn wait_for_recording_task(
-    recording_task: &mut Option<tokio::task::JoinHandle<Result<audio::AudioRecordingOutput>>>,
-) -> Result<Option<audio::AudioRecordingOutput>> {
-    match recording_task.take() {
-        Some(task) => task
-            .await
-            .context("Recording task failed to join")?
-            .map(Some),
-        None => Ok(None),
-    }
+async fn process_session(
+    runtime: &runtime::ScribeRuntime,
+    session_dir: std::path::PathBuf,
+) -> Result<()> {
+    runtime
+        .process_session(runtime::ProcessSessionInput {
+            session_dir,
+            context: runtime.note_generation_context_now(notes::NotesSystemPrompt::Default),
+            events: runtime::SessionProcessingEventSink::printing(),
+        })
+        .await?;
+
+    Ok(())
 }
