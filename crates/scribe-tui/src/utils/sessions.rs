@@ -2,7 +2,7 @@ use anyhow::Result;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use scribe_core::audio;
+use scribe_core::audio::{self, AudioSessionStore};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SessionEntry {
@@ -27,7 +27,10 @@ impl From<audio::SessionEntry> for SessionEntry {
 }
 
 pub fn list_sessions(base_dir: &Path) -> Result<Vec<SessionEntry>> {
-    audio::list_sessions(base_dir).map(|sessions| sessions.into_iter().map(Into::into).collect())
+    let store = audio::FileSystemAudioSessionStore::new(base_dir.to_path_buf());
+    store
+        .list_sessions()
+        .map(|output| output.sessions.into_iter().map(Into::into).collect())
 }
 
 pub fn recorded_at_from_session_name(name: &str) -> Option<SystemTime> {

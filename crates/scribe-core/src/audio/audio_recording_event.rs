@@ -37,7 +37,7 @@ impl AudioRecordingEvent {
         }
     }
 
-    pub(super) fn print(&self) {
+    pub(crate) fn print(&self) {
         match self {
             Self::StreamError { .. } => eprintln!("{}", self.message()),
             _ => println!("{}", self.message()),

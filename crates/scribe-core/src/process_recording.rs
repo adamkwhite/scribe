@@ -2,8 +2,8 @@ use crate::{audio, config};
 
 /// Process the most recent session: transcribe + generate notes.
 pub async fn process_recording(cfg: &config::Config) -> anyhow::Result<()> {
-    let output_dir = config::effective_output_dir(cfg)?;
-    tracing::info!(output_dir = %output_dir.display(), "processing latest recording");
-    let session_dir = audio::latest_session(&output_dir)?;
+    let session_store = audio::audio_session_store_from_config(cfg)?;
+    let session_dir = session_store.latest_recording_session()?.session_dir;
+    tracing::info!(session_dir = %session_dir.display(), "processing latest recording");
     crate::process_session::process_session(cfg, &session_dir).await
 }

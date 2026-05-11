@@ -14,8 +14,6 @@ use scribe_core::notes::NotesGenerator;
 use scribe_core::{audio, config, logging, notes, opener, transcribe};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
@@ -77,8 +75,8 @@ struct RecordingState {
     session_dir: PathBuf,
     session_name: String,
     started_at: Instant,
-    recording_flag: Arc<AtomicBool>,
-    task: tokio::task::JoinHandle<Result<()>>,
+    recording_control: audio::RecordingControl,
+    task: tokio::task::JoinHandle<Result<audio::AudioRecordingOutput>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -839,24 +837,32 @@ impl App {
             }
         };
         let cfg = self.cfg.as_ref().context("Scribe is not configured")?;
-        let session_dir = audio::create_session_dir(cfg, Some(&name))?;
+        let session_store = audio::audio_session_store_from_config(cfg)?;
+        let session_dir = session_store
+            .create_session(audio::CreateAudioSessionInput {
+                name: Some(name),
+                context: audio::CreateAudioSessionContext {
+                    timestamp: audio::AudioSessionTimestamp::now_local(),
+                },
+            })?
+            .session_dir;
         tracing::info!(session_dir = %session_dir.display(), "TUI recording session created");
-        let recording = Arc::new(AtomicBool::new(true));
-        let recording_for_task = recording.clone();
-        let sample_rate = cfg.sample_rate;
+        let recorder = audio::audio_recorder_from_config(cfg)?;
+        let recording_control = audio::RecordingControl::new_running();
+        let recording_control_for_task = recording_control.clone();
         let session_for_task = session_dir.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_for_task = tx.clone();
-
-        let task = tokio::task::spawn_blocking(move || {
-            audio::record_loopback_with_events(
-                recording_for_task,
-                sample_rate,
-                session_for_task,
-                move |event| {
-                    let _ = tx_for_task.send(ProcessingEvent::RecordingStatus(event.message()));
-                },
-            )
+        let task = tokio::spawn(async move {
+            recorder
+                .record(audio::AudioRecordingInput {
+                    control: recording_control_for_task,
+                    session_dir: session_for_task,
+                    events: audio::AudioRecordingEventSink::custom(move |event| {
+                        let _ = tx_for_task.send(ProcessingEvent::RecordingStatus(event.message()));
+                    }),
+                })
+                .await
         });
 
         self.recording_messages.clear();
@@ -868,7 +874,7 @@ impl App {
                 .unwrap_or_else(|| "Recording".to_string()),
             session_dir,
             started_at: Instant::now(),
-            recording_flag: recording,
+            recording_control,
             task,
         });
         self.processing_step = ProcessingStep::Finalizing;
@@ -889,7 +895,7 @@ impl App {
         self.processing_session = Some(recording.session_dir.clone());
         self.processing_step = ProcessingStep::Finalizing;
         self.screen = Screen::Processing;
-        recording.recording_flag.store(false, Ordering::Relaxed);
+        recording.recording_control.stop();
         tracing::info!(
             session_dir = %recording.session_dir.display(),
             "TUI recording stop requested; processing starting"
@@ -946,8 +952,8 @@ fn spawn_processing_task(
         let _ = tx.send(ProcessingEvent::Step(ProcessingStep::Finalizing));
         tracing::info!("TUI processing finalizing recording");
         match recording.task.await {
-            Ok(Ok(())) => {
-                tracing::info!("TUI recording finalized");
+            Ok(Ok(output)) => {
+                tracing::info!(wav_path = %output.wav_path.display(), "TUI recording finalized");
             }
             Ok(Err(error)) => {
                 tracing::error!(error = %error, "TUI recording finalization failed");
