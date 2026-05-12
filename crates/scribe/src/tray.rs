@@ -1,7 +1,9 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
+use std::path::Path;
+use std::process::Command;
 use tray_item::TrayItem;
 
-use scribe_core::{audio, config, notes, opener, runtime};
+use scribe_core::{audio, config, notes, runtime};
 
 enum TrayEvent {
     StartRecording,
@@ -119,6 +121,14 @@ Write-Output $name
 
     let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
     if name.is_empty() { None } else { Some(name) }
+}
+
+fn open_folder(path: &Path) -> Result<()> {
+    Command::new("explorer.exe")
+        .arg(path.to_string_lossy().as_ref())
+        .spawn()
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    Ok(())
 }
 
 pub async fn run(cfg: config::Config) -> Result<()> {
@@ -252,7 +262,7 @@ pub async fn run(cfg: config::Config) -> Result<()> {
             }
             TrayEvent::OpenNotes => {
                 if let Ok(dir) = config::effective_output_dir(&cfg) {
-                    let _ = opener::open_folder(&dir);
+                    let _ = open_folder(&dir);
                 }
             }
             TrayEvent::OpenSettings => {

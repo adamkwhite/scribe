@@ -1,5 +1,7 @@
 use anyhow::{Context, Result};
+use sha2::{Digest, Sha256};
 use std::future::Future;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tokio::io::AsyncWriteExt;
 
@@ -11,6 +13,9 @@ const MANAGED_MODEL_FILENAME: &str = "ggml-base.en.bin";
 
 const MANAGED_MODEL_URL: &str =
     "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-base.en.bin";
+
+const MANAGED_MODEL_SHA256: &str =
+    "a03779c86df3323075f5e796cb2ce5029f00ec8869eee3fdfb897afe36c6d002";
 
 pub fn managed_model_filename() -> &'static str {
     MANAGED_MODEL_FILENAME
@@ -45,26 +50,16 @@ where
     let config_dir = config_dir()?;
     ensure_managed_whisper_model_in_dir_with_events(
         &config_dir,
+        MANAGED_MODEL_SHA256,
         download_managed_whisper_model,
         on_event,
     )
     .await
 }
 
-#[cfg(test)]
-async fn ensure_managed_whisper_model_in_dir<F, Fut>(
-    config_dir: &Path,
-    downloader: F,
-) -> Result<PathBuf>
-where
-    F: FnOnce(PathBuf) -> Fut,
-    Fut: Future<Output = Result<()>>,
-{
-    ensure_managed_whisper_model_in_dir_with_events(config_dir, downloader, |_| {}).await
-}
-
 async fn ensure_managed_whisper_model_in_dir_with_events<F, Fut, R>(
     config_dir: &Path,
+    expected_sha256: &str,
     downloader: F,
     mut on_event: R,
 ) -> Result<PathBuf>
@@ -75,9 +70,23 @@ where
 {
     let model_path = managed_model_path_in_dir(config_dir);
     if model_path.exists() {
-        on_event(ModelDownloadEvent::AlreadyPresent(model_path.clone()));
-        tracing::info!(model_path = %model_path.display(), "managed Whisper model already present");
-        return Ok(model_path);
+        let actual_sha256 = file_sha256(&model_path)?;
+        if actual_sha256 == expected_sha256 {
+            on_event(ModelDownloadEvent::AlreadyPresent(model_path.clone()));
+            tracing::info!(
+                model_path = %model_path.display(),
+                sha256 = actual_sha256,
+                "managed Whisper model already present"
+            );
+            return Ok(model_path);
+        }
+
+        tracing::warn!(
+            model_path = %model_path.display(),
+            expected_sha256,
+            actual_sha256,
+            "managed Whisper model checksum mismatch; redownloading"
+        );
     }
 
     std::fs::create_dir_all(config_dir)
@@ -102,6 +111,21 @@ where
         return Err(error);
     }
 
+    if let Err(error) = verify_file_sha256(&download_path, expected_sha256) {
+        let _ = std::fs::remove_file(&download_path);
+        tracing::warn!(
+            error = %error,
+            model_path = %model_path.display(),
+            "managed Whisper model download failed checksum verification"
+        );
+        return Err(error);
+    }
+
+    if model_path.exists() {
+        std::fs::remove_file(&model_path)
+            .with_context(|| format!("Failed to replace {}", model_path.display()))?;
+    }
+
     std::fs::rename(&download_path, &model_path).with_context(|| {
         format!(
             "Failed to move downloaded model from {} to {}",
@@ -113,6 +137,39 @@ where
     on_event(ModelDownloadEvent::Downloaded(model_path.clone()));
     tracing::info!(model_path = %model_path.display(), "managed Whisper model downloaded");
     Ok(model_path)
+}
+
+fn verify_file_sha256(path: &Path, expected_sha256: &str) -> Result<()> {
+    let actual_sha256 = file_sha256(path)?;
+    if actual_sha256 != expected_sha256 {
+        anyhow::bail!(
+            "Whisper model checksum mismatch for {}: expected {}, got {}",
+            path.display(),
+            expected_sha256,
+            actual_sha256
+        );
+    }
+
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file =
+        std::fs::File::open(path).with_context(|| format!("Failed to open {}", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 64 * 1024];
+
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to read {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+
+    Ok(format!("{:x}", hasher.finalize()))
 }
 
 async fn download_managed_whisper_model(download_path: PathBuf) -> Result<()> {
@@ -151,6 +208,24 @@ mod tests {
     use std::cell::Cell;
     use std::rc::Rc;
 
+    async fn ensure_managed_whisper_model_in_dir_with_sha256<F, Fut>(
+        config_dir: &Path,
+        expected_sha256: &str,
+        downloader: F,
+    ) -> Result<PathBuf>
+    where
+        F: FnOnce(PathBuf) -> Fut,
+        Fut: Future<Output = Result<()>>,
+    {
+        ensure_managed_whisper_model_in_dir_with_events(
+            config_dir,
+            expected_sha256,
+            downloader,
+            |_| {},
+        )
+        .await
+    }
+
     #[test]
     fn managed_model_path_uses_config_dir() {
         let temp = tempfile::tempdir().unwrap();
@@ -161,17 +236,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_hit_skips_downloader() {
+    async fn matching_cache_hit_skips_downloader() {
         let temp = tempfile::tempdir().unwrap();
         let model_path = managed_model_path_in_dir(temp.path());
         std::fs::write(&model_path, b"cached model").unwrap();
         let called = Rc::new(Cell::new(false));
         let called_for_download = called.clone();
 
-        let path = ensure_managed_whisper_model_in_dir(temp.path(), move |_| {
-            called_for_download.set(true);
-            async { Ok(()) }
-        })
+        let path = ensure_managed_whisper_model_in_dir_with_sha256(
+            temp.path(),
+            "14c66da7593e2d9614a0bb4a7169d64085e5e0b952585d2a4ebd4aa5c228d96b",
+            move |_| {
+                called_for_download.set(true);
+                async { Ok(()) }
+            },
+        )
         .await
         .unwrap();
 
@@ -180,16 +259,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn cache_miss_downloads_to_temp_file_and_renames() {
+    async fn cache_miss_downloads_matching_model_to_temp_file_and_renames() {
         let temp = tempfile::tempdir().unwrap();
         let model_path = managed_model_path_in_dir(temp.path());
         let expected_download_path = model_path.with_extension("bin.download");
 
-        let path = ensure_managed_whisper_model_in_dir(temp.path(), |download_path| async move {
-            assert_eq!(download_path, expected_download_path);
-            std::fs::write(download_path, b"downloaded model")?;
-            Ok(())
-        })
+        let path = ensure_managed_whisper_model_in_dir_with_sha256(
+            temp.path(),
+            "6f1b9e8b969d1ea18bd8ba51a2ba697f55142b337f163df6a7daf850453dd161",
+            |download_path| async move {
+                assert_eq!(download_path, expected_download_path);
+                std::fs::write(download_path, b"downloaded model")?;
+                Ok(())
+            },
+        )
         .await
         .unwrap();
 
@@ -199,18 +282,75 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn mismatched_cache_redownloads_and_replaces_after_verified_download() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_path = managed_model_path_in_dir(temp.path());
+        std::fs::write(&model_path, b"wrong cached model").unwrap();
+        let called = Rc::new(Cell::new(false));
+        let called_for_download = called.clone();
+
+        let path = ensure_managed_whisper_model_in_dir_with_sha256(
+            temp.path(),
+            "6f1b9e8b969d1ea18bd8ba51a2ba697f55142b337f163df6a7daf850453dd161",
+            move |download_path| {
+                called_for_download.set(true);
+                async move {
+                    std::fs::write(download_path, b"downloaded model")?;
+                    Ok(())
+                }
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(path, model_path);
+        assert!(called.get());
+        assert_eq!(std::fs::read(&model_path).unwrap(), b"downloaded model");
+        assert!(!model_path.with_extension("bin.download").exists());
+    }
+
+    #[tokio::test]
     async fn failed_download_leaves_no_final_model_file() {
         let temp = tempfile::tempdir().unwrap();
         let model_path = managed_model_path_in_dir(temp.path());
 
-        let error = ensure_managed_whisper_model_in_dir(temp.path(), |download_path| async move {
-            std::fs::write(download_path, b"partial model")?;
-            anyhow::bail!("network failed")
-        })
+        let error = ensure_managed_whisper_model_in_dir_with_sha256(
+            temp.path(),
+            "6f1b9e8b969d1ea18bd8ba51a2ba697f55142b337f163df6a7daf850453dd161",
+            |download_path| async move {
+                std::fs::write(download_path, b"partial model")?;
+                anyhow::bail!("network failed")
+            },
+        )
         .await
         .unwrap_err();
 
         assert!(error.to_string().contains("network failed"));
+        assert!(!model_path.exists());
+        assert!(!model_path.with_extension("bin.download").exists());
+    }
+
+    #[tokio::test]
+    async fn checksum_mismatch_removes_download_and_leaves_no_final_model_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let model_path = managed_model_path_in_dir(temp.path());
+
+        let error = ensure_managed_whisper_model_in_dir_with_sha256(
+            temp.path(),
+            "6f1b9e8b969d1ea18bd8ba51a2ba697f55142b337f163df6a7daf850453dd161",
+            |download_path| async move {
+                std::fs::write(download_path, b"partial model")?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Whisper model checksum mismatch")
+        );
         assert!(!model_path.exists());
         assert!(!model_path.with_extension("bin.download").exists());
     }

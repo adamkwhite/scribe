@@ -10,7 +10,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, List, ListItem, Paragraph, Wrap};
 use ratatui::{Frame, Terminal};
-use scribe_core::{audio, config, logging, notes, opener, runtime};
+use scribe_core::{audio, config, logging, notes, runtime};
 use std::io::{self, Stdout};
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -18,6 +18,7 @@ use std::time::{Duration, Instant, SystemTime};
 use tokio::sync::mpsc;
 use unicode_width::UnicodeWidthStr;
 
+mod opener;
 mod playback;
 mod session_store;
 mod utils;

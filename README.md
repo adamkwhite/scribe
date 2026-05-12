@@ -49,8 +49,9 @@ openrouter_api_key = "sk-or-..."
 
 If the config uses the managed model path, use the TUI setup screen's Download
 model action to fetch `ggml-base.en.bin` under the same directory as the
-application config. Later runs reuse the existing file without re-downloading
-it. Startup only creates or loads config; it does not begin a model download.
+application config. Later uses of that action verify the existing managed file's
+SHA-256 before reusing it and redownload the file if the checksum does not
+match. Startup only creates or loads config; it does not begin a model download.
 
 ### External whisper.cpp CLI override
 
