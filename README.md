@@ -9,15 +9,32 @@ Local meeting transcription and note generation. Records system audio, transcrib
 - Optional: `whisper-cli` from whisper.cpp when you want to override the embedded backend
 - [OpenRouter](https://openrouter.ai/) API key
 
+### Linux contributor packages
+
+Install these packages before running `cargo build`, `cargo clippy`, or `cargo test` on Linux:
+
+- `libasound2-dev` for `cpal`/`alsa-sys`
+- `clang` and `libclang-dev` for `whisper-rs-sys`/`bindgen`
+- `cmake` for the embedded `whisper.cpp` native build
+
+On Ubuntu/Debian:
+
+```sh
+sudo apt-get update
+sudo apt-get install -y libasound2-dev clang libclang-dev cmake
+```
+
 ## Setup
 
 ### Default embedded Whisper backend
 
 1. Build: `cargo build --release --workspace`
 2. Run once to generate config: `scribe.exe` on Windows or `scribe-cli` on other platforms
-3. Edit config at `%APPDATA%/scribe/config.toml`:
+3. Edit the generated config file:
+   - Windows: `%APPDATA%/scribe/config.toml`
+   - Linux: `~/.config/scribe/config.toml`
    ```toml
-   whisper_model = "C:/path/to/ggml-base.en.bin"
+   whisper_model = "/path/to/ggml-base.en.bin"
    openrouter_api_key = "sk-or-..."
    ```
 
@@ -26,7 +43,7 @@ during Cargo's native build. The built binary does not need `whisper-cli` on the
 host, but it still needs a model path:
 
 ```toml
-whisper_model = "C:/path/to/ggml-base.en.bin"
+whisper_model = "/path/to/ggml-base.en.bin"
 openrouter_api_key = "sk-or-..."
 ```
 
