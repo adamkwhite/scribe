@@ -13,6 +13,20 @@ enum TrayEvent {
     Quit,
 }
 
+/// Non-blocking send from a tray menu callback. The callback runs on the
+/// Windows tray thread (not the tokio runtime), so we use `try_send` instead
+/// of `block_on(send)` — a full channel drops the rapid click and traces it
+/// rather than freezing the tray menu.
+fn dispatch_tray_event(
+    tx: &tokio::sync::mpsc::Sender<TrayEvent>,
+    event: TrayEvent,
+    label: &'static str,
+) {
+    if let Err(e) = tx.try_send(event) {
+        tracing::warn!(error = ?e, "dropped tray event: {label}");
+    }
+}
+
 /// Create a simple 16x16 icon programmatically (a green square with S).
 fn create_default_icon() -> tray_item::IconSource {
     // Create a 16x16 icon using CreateIcon Windows API
@@ -136,8 +150,6 @@ pub async fn run(cfg: config::Config) -> Result<()> {
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrayEvent>(4);
     let mut recording: Option<runtime::ActiveRecording> = None;
 
-    let rt = tokio::runtime::Handle::current();
-
     let tx1 = tx.clone();
     let tx2 = tx.clone();
     let tx3 = tx.clone();
@@ -150,37 +162,32 @@ pub async fn run(cfg: config::Config) -> Result<()> {
 
         tray.add_label("Scribe — Meeting Notes").ok();
 
-        let rt1 = rt.clone();
         tray.add_menu_item("Start Recording", move || {
-            let _ = rt1.block_on(tx1.send(TrayEvent::StartRecording));
+            dispatch_tray_event(&tx1, TrayEvent::StartRecording, "StartRecording");
         })
         .ok();
 
-        let rt2 = rt.clone();
         tray.add_menu_item("Stop & Process", move || {
-            let _ = rt2.block_on(tx2.send(TrayEvent::StopRecording));
+            dispatch_tray_event(&tx2, TrayEvent::StopRecording, "StopRecording");
         })
         .ok();
 
         tray.inner_mut().add_separator().ok();
 
-        let rt3 = rt.clone();
         tray.add_menu_item("Open Notes Folder", move || {
-            let _ = rt3.block_on(tx3.send(TrayEvent::OpenNotes));
+            dispatch_tray_event(&tx3, TrayEvent::OpenNotes, "OpenNotes");
         })
         .ok();
 
-        let rt4 = rt.clone();
         tray.add_menu_item("Settings", move || {
-            let _ = rt4.block_on(tx4.send(TrayEvent::OpenSettings));
+            dispatch_tray_event(&tx4, TrayEvent::OpenSettings, "OpenSettings");
         })
         .ok();
 
         tray.inner_mut().add_separator().ok();
 
-        let rt5 = rt.clone();
         tray.add_menu_item("Quit", move || {
-            let _ = rt5.block_on(tx5.send(TrayEvent::Quit));
+            dispatch_tray_event(&tx5, TrayEvent::Quit, "Quit");
         })
         .ok();
 
@@ -190,7 +197,7 @@ pub async fn run(cfg: config::Config) -> Result<()> {
         }
     });
 
-    println!("Scribe running in system tray.");
+    tracing::info!("scribe tray running");
 
     while let Some(event) = rx.recv().await {
         match event {
@@ -215,7 +222,6 @@ async fn handle_start_recording(
 ) {
     if recording.as_ref().is_some_and(|r| r.is_recording()) {
         tracing::info!("tray start command ignored because recording is already active");
-        println!("Already recording.");
         return;
     }
 
@@ -231,16 +237,13 @@ async fn handle_start_recording(
         Ok(r) => r,
         Err(e) => {
             tracing::error!(error = %e, "tray failed to create recording session");
-            eprintln!("Failed to create session: {e}");
             return;
         }
     };
     let session_dir = active_recording.session_dir().to_path_buf();
     tracing::info!(session_dir = %session_dir.display(), "tray recording session created");
-    println!("Session: {}", session_dir.display());
     *recording = Some(active_recording);
     tracing::info!("tray recording started");
-    println!("Recording started.");
 }
 
 async fn handle_stop_recording(
@@ -249,27 +252,23 @@ async fn handle_stop_recording(
 ) {
     if !recording.as_ref().is_some_and(|r| r.is_recording()) {
         tracing::info!("tray stop command ignored because no recording is active");
-        println!("Not recording.");
         return;
     }
     let active_recording = recording.take().expect("recording presence checked above");
     let session_dir = active_recording.session_dir().to_path_buf();
     active_recording.stop();
     tracing::info!("tray recording stop requested");
-    println!("Recording stopped. Processing...");
     match active_recording.wait().await {
         Ok(output) => {
             tracing::info!(wav_path = %output.wav_path.display(), "tray recording finalized");
         }
         Err(e) => {
             tracing::error!(error = %e, "tray recording finalization failed");
-            eprintln!("Recording error: {e}");
             return;
         }
     }
     if let Err(e) = process_session(scribe_runtime, session_dir).await {
         tracing::error!(error = %e, "tray processing failed");
-        eprintln!("Processing error: {e}");
     }
 }
 
@@ -295,7 +294,6 @@ async fn handle_quit(recording: &mut Option<runtime::ActiveRecording>) {
         }
     }
     tracing::info!("scribe tray exiting");
-    println!("Bye.");
     std::process::exit(0);
 }
 

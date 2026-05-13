@@ -9,7 +9,7 @@ mod settings;
 mod validate_setup;
 
 pub use default_config::default_config;
-pub use load_or_create::load_or_create;
+pub use load_or_create::{ConfigOrigin, load_or_create};
 pub use managed_model::{
     ensure_managed_whisper_model, ensure_managed_whisper_model_with_events, managed_model_filename,
     managed_model_path_in_dir, resolve_managed_whisper_model_config,

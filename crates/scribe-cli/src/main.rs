@@ -5,7 +5,12 @@ use scribe_core::{audio, config, notes, runtime};
 async fn main() -> Result<()> {
     let log_path = scribe_core::logging::init_file_logging("scribe-cli")?;
     tracing::info!(log_path = %log_path.display(), "scribe CLI starting");
-    let cfg = config::load_or_create()?;
+    let (cfg, origin) = config::load_or_create()?;
+    if let config::ConfigOrigin::JustCreated(path) = origin {
+        println!("Created config at: {}", path.display());
+        println!("Please edit it with your whisper model path and OpenRouter API key.");
+        println!();
+    }
     let runtime = runtime::ScribeRuntime::from_config(&cfg)?;
     run_cli(runtime).await
 }
