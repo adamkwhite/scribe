@@ -1,0 +1,39 @@
+name: Build
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  sonarqube:
+    name: SonarQube
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux native build dependencies
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev clang libclang-dev cmake
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Generate coverage (LCOV)
+        run: cargo llvm-cov --workspace --all-features --lcov --output-path lcov.info
+
+      - name: Generate clippy report (JSON)
+        run: cargo clippy --workspace --all-targets --all-features --message-format=json > clippy-report.json || true
+
+      - name: SonarQube Scan
+        uses: SonarSource/sonarqube-scan-action@fd88b7d7ccbaefd23d8f36f73b59db7a3d246602 # v6.0.0
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
