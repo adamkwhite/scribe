@@ -195,98 +195,108 @@ pub async fn run(cfg: config::Config) -> Result<()> {
     while let Some(event) = rx.recv().await {
         match event {
             TrayEvent::StartRecording => {
-                if recording
-                    .as_ref()
-                    .is_some_and(|recording| recording.is_recording())
-                {
-                    tracing::info!(
-                        "tray start command ignored because recording is already active"
-                    );
-                    println!("Already recording.");
-                    continue;
-                }
-
-                // Prompt for name via GUI dialog
-                let name = tokio::task::spawn_blocking(prompt_session_name_gui)
-                    .await
-                    .unwrap_or(None);
-
-                let active_recording =
-                    match scribe_runtime.start_recording(runtime::StartRecordingInput {
-                        name,
-                        context: scribe_runtime.recording_context_now(),
-                        events: audio::AudioRecordingEventSink::printing(),
-                    }) {
-                        Ok(recording) => recording,
-                        Err(e) => {
-                            tracing::error!(error = %e, "tray failed to create recording session");
-                            eprintln!("Failed to create session: {e}");
-                            continue;
-                        }
-                    };
-                let session_dir = active_recording.session_dir().to_path_buf();
-                tracing::info!(session_dir = %session_dir.display(), "tray recording session created");
-                println!("Session: {}", session_dir.display());
-                recording = Some(active_recording);
-                tracing::info!("tray recording started");
-                println!("Recording started.");
+                handle_start_recording(&scribe_runtime, &mut recording).await
             }
             TrayEvent::StopRecording => {
-                if !recording
-                    .as_ref()
-                    .is_some_and(|recording| recording.is_recording())
-                {
-                    tracing::info!("tray stop command ignored because no recording is active");
-                    println!("Not recording.");
-                    continue;
-                }
-                let active_recording = recording.take().expect("recording presence checked above");
-                let session_dir = active_recording.session_dir().to_path_buf();
-                active_recording.stop();
-                tracing::info!("tray recording stop requested");
-                println!("Recording stopped. Processing...");
-                match active_recording.wait().await {
-                    Ok(output) => {
-                        tracing::info!(wav_path = %output.wav_path.display(), "tray recording finalized");
-                    }
-                    Err(e) => {
-                        tracing::error!(error = %e, "tray recording finalization failed");
-                        eprintln!("Recording error: {e}");
-                        continue;
-                    }
-                }
-                if let Err(e) = process_session(&scribe_runtime, session_dir).await {
-                    tracing::error!(error = %e, "tray processing failed");
-                    eprintln!("Processing error: {e}");
-                }
+                handle_stop_recording(&scribe_runtime, &mut recording).await
             }
-            TrayEvent::OpenNotes => {
-                if let Ok(dir) = config::effective_output_dir(&cfg) {
-                    let _ = open_folder(&dir);
-                }
-            }
-            TrayEvent::OpenSettings => {
-                if let Ok(path) = config::config_path() {
-                    let _ = std::process::Command::new("notepad.exe")
-                        .arg(path.to_string_lossy().as_ref())
-                        .spawn();
-                }
-            }
-            TrayEvent::Quit => {
-                if let Some(active_recording) = recording.take() {
-                    active_recording.stop();
-                    if let Err(e) = active_recording.wait().await {
-                        tracing::error!(error = %e, "tray recording finalization failed during quit");
-                    }
-                }
-                tracing::info!("scribe tray exiting");
-                println!("Bye.");
-                std::process::exit(0);
-            }
+            TrayEvent::OpenNotes => handle_open_notes(&cfg),
+            TrayEvent::OpenSettings => handle_open_settings(),
+            TrayEvent::Quit => handle_quit(&mut recording).await,
         }
     }
 
     Ok(())
+}
+
+async fn handle_start_recording(
+    scribe_runtime: &runtime::ScribeRuntime,
+    recording: &mut Option<runtime::ActiveRecording>,
+) {
+    if recording.as_ref().is_some_and(|r| r.is_recording()) {
+        tracing::info!("tray start command ignored because recording is already active");
+        println!("Already recording.");
+        return;
+    }
+
+    let name = tokio::task::spawn_blocking(prompt_session_name_gui)
+        .await
+        .unwrap_or(None);
+
+    let active_recording = match scribe_runtime.start_recording(runtime::StartRecordingInput {
+        name,
+        context: scribe_runtime.recording_context_now(),
+        events: audio::AudioRecordingEventSink::printing(),
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "tray failed to create recording session");
+            eprintln!("Failed to create session: {e}");
+            return;
+        }
+    };
+    let session_dir = active_recording.session_dir().to_path_buf();
+    tracing::info!(session_dir = %session_dir.display(), "tray recording session created");
+    println!("Session: {}", session_dir.display());
+    *recording = Some(active_recording);
+    tracing::info!("tray recording started");
+    println!("Recording started.");
+}
+
+async fn handle_stop_recording(
+    scribe_runtime: &runtime::ScribeRuntime,
+    recording: &mut Option<runtime::ActiveRecording>,
+) {
+    if !recording.as_ref().is_some_and(|r| r.is_recording()) {
+        tracing::info!("tray stop command ignored because no recording is active");
+        println!("Not recording.");
+        return;
+    }
+    let active_recording = recording.take().expect("recording presence checked above");
+    let session_dir = active_recording.session_dir().to_path_buf();
+    active_recording.stop();
+    tracing::info!("tray recording stop requested");
+    println!("Recording stopped. Processing...");
+    match active_recording.wait().await {
+        Ok(output) => {
+            tracing::info!(wav_path = %output.wav_path.display(), "tray recording finalized");
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "tray recording finalization failed");
+            eprintln!("Recording error: {e}");
+            return;
+        }
+    }
+    if let Err(e) = process_session(scribe_runtime, session_dir).await {
+        tracing::error!(error = %e, "tray processing failed");
+        eprintln!("Processing error: {e}");
+    }
+}
+
+fn handle_open_notes(cfg: &config::Config) {
+    if let Ok(dir) = config::effective_output_dir(cfg) {
+        let _ = open_folder(&dir);
+    }
+}
+
+fn handle_open_settings() {
+    if let Ok(path) = config::config_path() {
+        let _ = std::process::Command::new("notepad.exe")
+            .arg(path.to_string_lossy().as_ref())
+            .spawn();
+    }
+}
+
+async fn handle_quit(recording: &mut Option<runtime::ActiveRecording>) {
+    if let Some(active_recording) = recording.take() {
+        active_recording.stop();
+        if let Err(e) = active_recording.wait().await {
+            tracing::error!(error = %e, "tray recording finalization failed during quit");
+        }
+    }
+    tracing::info!("scribe tray exiting");
+    println!("Bye.");
+    std::process::exit(0);
 }
 
 async fn process_session(

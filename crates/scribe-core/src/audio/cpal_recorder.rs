@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
+use std::collections::VecDeque;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 
@@ -94,25 +95,8 @@ fn run_cpal_recording(
     session_dir: PathBuf,
     events: AudioRecordingEventSink,
 ) -> Result<AudioRecordingOutput> {
-    #[cfg(target_os = "windows")]
-    let host = cpal::host_from_id(cpal::HostId::Wasapi).context("WASAPI host not available")?;
-
-    #[cfg(not(target_os = "windows"))]
-    let host = cpal::default_host();
-
-    #[cfg(target_os = "windows")]
-    let loopback_device = host
-        .default_output_device()
-        .context("No default output device found")?;
-
-    #[cfg(not(target_os = "windows"))]
-    let loopback_device = host
-        .default_input_device()
-        .context("No default input device found")?;
-
-    let mic_device = host
-        .default_input_device()
-        .context("No default input (mic) device found")?;
+    let host = audio_host()?;
+    let (loopback_device, mic_device) = select_audio_devices(&host)?;
 
     events.emit(AudioRecordingEvent::LoopbackDevice(
         loopback_device.name().unwrap_or_default(),
@@ -121,135 +105,30 @@ fn run_cpal_recording(
         mic_device.name().unwrap_or_default(),
     ));
 
-    let loopback_config = loopback_device
-        .default_output_config()
-        .or_else(|_| loopback_device.default_input_config())
-        .context("Failed to get loopback audio config")?;
+    let (loopback_config, mic_config, output_sample_rate) =
+        gather_audio_configs(&loopback_device, &mic_device, &events)?;
 
-    let mic_config = mic_device
-        .default_input_config()
-        .context("Failed to get mic audio config")?;
-
-    let output_sample_rate = loopback_config.sample_rate().0;
-    events.emit(AudioRecordingEvent::AudioConfig {
-        loopback_sample_rate: loopback_config.sample_rate().0,
-        loopback_channels: loopback_config.channels(),
-        mic_sample_rate: mic_config.sample_rate().0,
-        mic_channels: mic_config.channels(),
-        output_sample_rate,
-    });
-
-    let spec = WavSpec {
-        channels: 1,
-        sample_rate: output_sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    std::fs::create_dir_all(&session_dir)?;
-    let wav_path = session_dir.join("recording.wav");
-
-    let writer = WavWriter::create(&wav_path, spec)
-        .with_context(|| format!("Failed to create {}", wav_path.display()))?;
-    let writer = Arc::new(Mutex::new(Some(writer)));
-
+    let (wav_path, writer) = create_wav_writer(&session_dir, output_sample_rate)?;
     let mix = Arc::new(Mutex::new(MixBuffer::new()));
 
-    let mix_lb = mix.clone();
-    let control_lb = control.clone();
-    let lb_channels = loopback_config.channels();
-    let report_lb_f32 = events.clone();
-    let report_lb_i16 = events.clone();
-
-    let loopback_stream = match loopback_config.sample_format() {
-        cpal::SampleFormat::F32 => loopback_device.build_input_stream(
-            &loopback_config.config(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if !control_lb.is_recording() {
-                    return;
-                }
-                let mono = to_mono_f32(data, lb_channels);
-                if let Ok(mut m) = mix_lb.lock() {
-                    m.loopback.extend(mono);
-                }
-            },
-            move |err| {
-                report_lb_f32.emit(AudioRecordingEvent::StreamError {
-                    source: "Loopback",
-                    error: err.to_string(),
-                })
-            },
-            None,
-        )?,
-        cpal::SampleFormat::I16 => loopback_device.build_input_stream(
-            &loopback_config.config(),
-            move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                if !control_lb.is_recording() {
-                    return;
-                }
-                let mono = i16_to_mono_f32(data, lb_channels);
-                if let Ok(mut m) = mix_lb.lock() {
-                    m.loopback.extend(mono);
-                }
-            },
-            move |err| {
-                report_lb_i16.emit(AudioRecordingEvent::StreamError {
-                    source: "Loopback",
-                    error: err.to_string(),
-                })
-            },
-            None,
-        )?,
-        format => anyhow::bail!("Unsupported loopback sample format: {format:?}"),
-    };
-
-    let mix_mic = mix.clone();
-    let control_mic = control.clone();
-    let mic_channels = mic_config.channels();
-    let report_mic_f32 = events.clone();
-    let report_mic_i16 = events.clone();
-
-    let mic_stream = match mic_config.sample_format() {
-        cpal::SampleFormat::F32 => mic_device.build_input_stream(
-            &mic_config.config(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                if !control_mic.is_recording() {
-                    return;
-                }
-                let mono = to_mono_f32(data, mic_channels);
-                if let Ok(mut m) = mix_mic.lock() {
-                    m.mic.extend(mono);
-                }
-            },
-            move |err| {
-                report_mic_f32.emit(AudioRecordingEvent::StreamError {
-                    source: "Mic",
-                    error: err.to_string(),
-                })
-            },
-            None,
-        )?,
-        cpal::SampleFormat::I16 => mic_device.build_input_stream(
-            &mic_config.config(),
-            move |data: &[i16], _: &cpal::InputCallbackInfo| {
-                if !control_mic.is_recording() {
-                    return;
-                }
-                let mono = i16_to_mono_f32(data, mic_channels);
-                if let Ok(mut m) = mix_mic.lock() {
-                    m.mic.extend(mono);
-                }
-            },
-            move |err| {
-                report_mic_i16.emit(AudioRecordingEvent::StreamError {
-                    source: "Mic",
-                    error: err.to_string(),
-                })
-            },
-            None,
-        )?,
-        format => anyhow::bail!("Unsupported mic sample format: {format:?}"),
-    };
+    let loopback_stream = build_recording_input_stream(
+        &loopback_device,
+        &loopback_config,
+        control.clone(),
+        events.clone(),
+        "Loopback",
+        mix.clone(),
+        |m| &mut m.loopback,
+    )?;
+    let mic_stream = build_recording_input_stream(
+        &mic_device,
+        &mic_config,
+        control.clone(),
+        events.clone(),
+        "Mic",
+        mix.clone(),
+        |m| &mut m.mic,
+    )?;
 
     loopback_stream
         .play()
@@ -274,6 +153,147 @@ fn run_cpal_recording(
 
     events.emit(AudioRecordingEvent::SavedRecording(wav_path.clone()));
     Ok(AudioRecordingOutput { wav_path })
+}
+
+fn audio_host() -> Result<cpal::Host> {
+    #[cfg(target_os = "windows")]
+    {
+        cpal::host_from_id(cpal::HostId::Wasapi).context("WASAPI host not available")
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        Ok(cpal::default_host())
+    }
+}
+
+fn select_audio_devices(host: &cpal::Host) -> Result<(cpal::Device, cpal::Device)> {
+    #[cfg(target_os = "windows")]
+    let loopback_device = host
+        .default_output_device()
+        .context("No default output device found")?;
+    #[cfg(not(target_os = "windows"))]
+    let loopback_device = host
+        .default_input_device()
+        .context("No default input device found")?;
+
+    let mic_device = host
+        .default_input_device()
+        .context("No default input (mic) device found")?;
+    Ok((loopback_device, mic_device))
+}
+
+fn gather_audio_configs(
+    loopback_device: &cpal::Device,
+    mic_device: &cpal::Device,
+    events: &AudioRecordingEventSink,
+) -> Result<(
+    cpal::SupportedStreamConfig,
+    cpal::SupportedStreamConfig,
+    u32,
+)> {
+    let loopback_config = loopback_device
+        .default_output_config()
+        .or_else(|_| loopback_device.default_input_config())
+        .context("Failed to get loopback audio config")?;
+
+    let mic_config = mic_device
+        .default_input_config()
+        .context("Failed to get mic audio config")?;
+
+    let output_sample_rate = loopback_config.sample_rate().0;
+    events.emit(AudioRecordingEvent::AudioConfig {
+        loopback_sample_rate: loopback_config.sample_rate().0,
+        loopback_channels: loopback_config.channels(),
+        mic_sample_rate: mic_config.sample_rate().0,
+        mic_channels: mic_config.channels(),
+        output_sample_rate,
+    });
+
+    Ok((loopback_config, mic_config, output_sample_rate))
+}
+
+type WavWriterHandle = Arc<Mutex<Option<WavWriter<std::io::BufWriter<std::fs::File>>>>>;
+
+fn create_wav_writer(
+    session_dir: &Path,
+    output_sample_rate: u32,
+) -> Result<(PathBuf, WavWriterHandle)> {
+    let spec = WavSpec {
+        channels: 1,
+        sample_rate: output_sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    std::fs::create_dir_all(session_dir)?;
+    let wav_path = session_dir.join("recording.wav");
+
+    let writer = WavWriter::create(&wav_path, spec)
+        .with_context(|| format!("Failed to create {}", wav_path.display()))?;
+    Ok((wav_path, Arc::new(Mutex::new(Some(writer)))))
+}
+
+fn build_recording_input_stream(
+    device: &cpal::Device,
+    supported: &cpal::SupportedStreamConfig,
+    control: RecordingControl,
+    events: AudioRecordingEventSink,
+    label: &'static str,
+    mix: Arc<Mutex<MixBuffer>>,
+    field: fn(&mut MixBuffer) -> &mut VecDeque<f32>,
+) -> Result<cpal::Stream> {
+    let channels = supported.channels();
+    let cfg = supported.config();
+
+    let stream = match supported.sample_format() {
+        cpal::SampleFormat::F32 => {
+            let err_events = events;
+            device.build_input_stream(
+                &cfg,
+                move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                    if !control.is_recording() {
+                        return;
+                    }
+                    let mono = to_mono_f32(data, channels);
+                    if let Ok(mut m) = mix.lock() {
+                        field(&mut m).extend(mono);
+                    }
+                },
+                move |err| {
+                    err_events.emit(AudioRecordingEvent::StreamError {
+                        source: label,
+                        error: err.to_string(),
+                    });
+                },
+                None,
+            )?
+        }
+        cpal::SampleFormat::I16 => {
+            let err_events = events;
+            device.build_input_stream(
+                &cfg,
+                move |data: &[i16], _: &cpal::InputCallbackInfo| {
+                    if !control.is_recording() {
+                        return;
+                    }
+                    let mono = i16_to_mono_f32(data, channels);
+                    if let Ok(mut m) = mix.lock() {
+                        field(&mut m).extend(mono);
+                    }
+                },
+                move |err| {
+                    err_events.emit(AudioRecordingEvent::StreamError {
+                        source: label,
+                        error: err.to_string(),
+                    });
+                },
+                None,
+            )?
+        }
+        format => anyhow::bail!("Unsupported {label} sample format: {format:?}"),
+    };
+
+    Ok(stream)
 }
 
 fn write_mixed_samples(
@@ -305,6 +325,37 @@ mod tests {
         let recorder = CpalAudioRecorder::from_config(&config_with_sample_rate(22_050));
 
         assert_eq!(recorder.target_sample_rate, 22_050);
+    }
+
+    #[test]
+    fn create_wav_writer_creates_session_dir_and_returns_recording_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("new-session");
+
+        let (wav_path, handle) = create_wav_writer(&session_dir, 16_000).unwrap();
+
+        assert_eq!(wav_path, session_dir.join("recording.wav"));
+        assert!(session_dir.is_dir(), "session_dir should be created");
+        assert!(wav_path.exists(), "wav file should be created");
+
+        // Finalize so we don't leak the file handle.
+        let mut guard = handle.lock().unwrap();
+        if let Some(w) = guard.take() {
+            w.finalize().unwrap();
+        }
+    }
+
+    #[test]
+    fn create_wav_writer_fails_when_parent_path_is_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocking_file = temp.path().join("blocker");
+        std::fs::write(&blocking_file, b"").unwrap();
+
+        // Asking to create the session dir at a path occupied by a regular
+        // file should fail at create_dir_all.
+        let result = create_wav_writer(&blocking_file, 16_000);
+
+        assert!(result.is_err());
     }
 
     #[tokio::test]
