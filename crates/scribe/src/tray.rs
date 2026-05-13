@@ -1,9 +1,9 @@
-use anyhow::Result;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use anyhow::{Context, Result};
+use std::path::Path;
+use std::process::Command;
 use tray_item::TrayItem;
 
-use crate::{audio, config, process_recording, prompt_session_name_gui};
+use scribe_core::{audio, config, notes, runtime};
 
 enum TrayEvent {
     StartRecording,
@@ -107,9 +107,34 @@ fn create_default_icon() -> tray_item::IconSource {
     }
 }
 
+/// Prompt for a session name via Windows input dialog.
+fn prompt_session_name_gui() -> Option<String> {
+    let script = r#"
+Add-Type -AssemblyName Microsoft.VisualBasic
+$name = [Microsoft.VisualBasic.Interaction]::InputBox("Enter a name for this recording (or leave blank):", "Scribe — New Recording", "")
+Write-Output $name
+"#;
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-Command", script])
+        .output()
+        .ok()?;
+
+    let name = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if name.is_empty() { None } else { Some(name) }
+}
+
+fn open_folder(path: &Path) -> Result<()> {
+    Command::new("explorer.exe")
+        .arg(path.to_string_lossy().as_ref())
+        .spawn()
+        .with_context(|| format!("Failed to open {}", path.display()))?;
+    Ok(())
+}
+
 pub async fn run(cfg: config::Config) -> Result<()> {
+    let scribe_runtime = runtime::ScribeRuntime::from_config(&cfg)?;
     let (tx, mut rx) = tokio::sync::mpsc::channel::<TrayEvent>(4);
-    let recording = Arc::new(AtomicBool::new(false));
+    let mut recording: Option<runtime::ActiveRecording> = None;
 
     let rt = tokio::runtime::Handle::current();
 
@@ -170,7 +195,13 @@ pub async fn run(cfg: config::Config) -> Result<()> {
     while let Some(event) = rx.recv().await {
         match event {
             TrayEvent::StartRecording => {
-                if recording.load(Ordering::Relaxed) {
+                if recording
+                    .as_ref()
+                    .is_some_and(|recording| recording.is_recording())
+                {
+                    tracing::info!(
+                        "tray start command ignored because recording is already active"
+                    );
                     println!("Already recording.");
                     continue;
                 }
@@ -180,41 +211,58 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                     .await
                     .unwrap_or(None);
 
-                let session_dir = match audio::create_session_dir(name.as_deref()) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        eprintln!("Failed to create session: {e}");
-                        continue;
-                    }
-                };
+                let active_recording =
+                    match scribe_runtime.start_recording(runtime::StartRecordingInput {
+                        name,
+                        context: scribe_runtime.recording_context_now(),
+                        events: audio::AudioRecordingEventSink::printing(),
+                    }) {
+                        Ok(recording) => recording,
+                        Err(e) => {
+                            tracing::error!(error = %e, "tray failed to create recording session");
+                            eprintln!("Failed to create session: {e}");
+                            continue;
+                        }
+                    };
+                let session_dir = active_recording.session_dir().to_path_buf();
+                tracing::info!(session_dir = %session_dir.display(), "tray recording session created");
                 println!("Session: {}", session_dir.display());
-
-                recording.store(true, Ordering::Relaxed);
-                let rec = recording.clone();
-                let sample_rate = cfg.sample_rate;
-                tokio::task::spawn_blocking(move || {
-                    if let Err(e) = audio::record_loopback(rec, sample_rate, session_dir) {
-                        eprintln!("Recording error: {e}");
-                    }
-                });
+                recording = Some(active_recording);
+                tracing::info!("tray recording started");
                 println!("Recording started.");
             }
             TrayEvent::StopRecording => {
-                if !recording.load(Ordering::Relaxed) {
+                if !recording
+                    .as_ref()
+                    .is_some_and(|recording| recording.is_recording())
+                {
+                    tracing::info!("tray stop command ignored because no recording is active");
                     println!("Not recording.");
                     continue;
                 }
-                recording.store(false, Ordering::Relaxed);
+                let active_recording = recording.take().expect("recording presence checked above");
+                let session_dir = active_recording.session_dir().to_path_buf();
+                active_recording.stop();
+                tracing::info!("tray recording stop requested");
                 println!("Recording stopped. Processing...");
-                if let Err(e) = process_recording(&cfg).await {
+                match active_recording.wait().await {
+                    Ok(output) => {
+                        tracing::info!(wav_path = %output.wav_path.display(), "tray recording finalized");
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "tray recording finalization failed");
+                        eprintln!("Recording error: {e}");
+                        continue;
+                    }
+                }
+                if let Err(e) = process_session(&scribe_runtime, session_dir).await {
+                    tracing::error!(error = %e, "tray processing failed");
                     eprintln!("Processing error: {e}");
                 }
             }
             TrayEvent::OpenNotes => {
-                if let Ok(dir) = config::output_dir() {
-                    let _ = std::process::Command::new("explorer.exe")
-                        .arg(dir.to_string_lossy().as_ref())
-                        .spawn();
+                if let Ok(dir) = config::effective_output_dir(&cfg) {
+                    let _ = open_folder(&dir);
                 }
             }
             TrayEvent::OpenSettings => {
@@ -225,12 +273,33 @@ pub async fn run(cfg: config::Config) -> Result<()> {
                 }
             }
             TrayEvent::Quit => {
-                recording.store(false, Ordering::Relaxed);
+                if let Some(active_recording) = recording.take() {
+                    active_recording.stop();
+                    if let Err(e) = active_recording.wait().await {
+                        tracing::error!(error = %e, "tray recording finalization failed during quit");
+                    }
+                }
+                tracing::info!("scribe tray exiting");
                 println!("Bye.");
                 std::process::exit(0);
             }
         }
     }
+
+    Ok(())
+}
+
+async fn process_session(
+    runtime: &runtime::ScribeRuntime,
+    session_dir: std::path::PathBuf,
+) -> Result<()> {
+    runtime
+        .process_session(runtime::ProcessSessionInput {
+            session_dir,
+            context: runtime.note_generation_context_now(notes::NotesSystemPrompt::Default),
+            events: runtime::SessionProcessingEventSink::printing(),
+        })
+        .await?;
 
     Ok(())
 }

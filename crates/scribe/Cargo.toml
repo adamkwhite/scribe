@@ -1,0 +1,23 @@
+[package]
+name = "scribe"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+scribe-core = { workspace = true, default-features = false }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+tray-item = { version = "=0.10.0" }
+windows = { version = "=0.58.0", features = [
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    "Win32_UI_WindowsAndMessaging",
+] }
+# tray-item uses windows-sys for HICON, we need to bridge types
+windows-sys = { version = "=0.52.0", features = [
+    "Win32_UI_WindowsAndMessaging",
+] }

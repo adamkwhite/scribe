@@ -1,0 +1,39 @@
+[package]
+name = "scribe-core"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+
+[dependencies]
+tokio = { workspace = true }
+
+# HTTP client for OpenRouter API
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls"] }
+serde = { version = "=1.0.228", features = ["derive"] }
+serde_json = { version = "=1.0.149" }
+sha2 = { version = "=0.10.9" }
+
+# Audio capture
+cpal = { version = "=0.15.3" }
+
+# WAV file writing
+hound = { version = "=3.5.1" }
+
+# In-process whisper.cpp integration
+whisper-rs = { version = "=0.16.0", default-features = false }
+
+# Config
+dirs = { version = "=6.0.0" }
+toml = { version = "=0.8.23" }
+
+# Error handling
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-appender = { version = "=0.2.3" }
+tracing-subscriber = { version = "=0.3.19", features = ["fmt"] }
+
+# Timestamps for filenames
+chrono = { version = "=0.4.44" }
+
+[dev-dependencies]
+tempfile = { version = "=3.27.0" }

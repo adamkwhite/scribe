@@ -1,47 +1,21 @@
-[package]
-name = "scribe"
-version = "0.1.0"
+[workspace]
+members = [
+    "crates/scribe",
+    "crates/scribe-cli",
+    "crates/scribe-core",
+    "crates/scribe-tui",
+]
+resolver = "3"
+
+[workspace.package]
+version = "0.2.0"
 edition = "2024"
+rust-version = "1.94.0"
 description = "Local meeting transcription and note generation"
 license = "MIT"
 
-[dependencies]
-# Async runtime
-tokio = { version = "1", features = ["full"] }
-
-# HTTP client for OpenRouter API
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-
-# Audio capture (WASAPI loopback on Windows)
-cpal = "0.15"
-
-# WAV file writing
-hound = "3.5"
-
-# CLI and config
-clap = { version = "4", features = ["derive"] }
-dirs = "6"
-toml = "0.8"
-
-# Error handling
-anyhow = "1"
-
-# Timestamps for filenames
-chrono = "0.4"
-
-[dev-dependencies]
-tempfile = "3"
-
-[target.'cfg(windows)'.dependencies]
-tray-item = "0.10"
-windows = { version = "0.58", features = [
-    "Win32_Media_Audio",
-    "Win32_System_Com",
-    "Win32_UI_WindowsAndMessaging",
-] }
-# tray-item uses windows-sys for HICON, we need to bridge types
-windows-sys = { version = "0.52", features = [
-    "Win32_UI_WindowsAndMessaging",
-] }
+[workspace.dependencies]
+scribe-core = { path = "crates/scribe-core", default-features = false }
+anyhow = { version = "=1.0.102" }
+tokio = { version = "=1.52.3", features = ["full"] }
+tracing = { version = "=0.1.41" }
