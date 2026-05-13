@@ -327,6 +327,37 @@ mod tests {
         assert_eq!(recorder.target_sample_rate, 22_050);
     }
 
+    #[test]
+    fn create_wav_writer_creates_session_dir_and_returns_recording_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let session_dir = temp.path().join("new-session");
+
+        let (wav_path, handle) = create_wav_writer(&session_dir, 16_000).unwrap();
+
+        assert_eq!(wav_path, session_dir.join("recording.wav"));
+        assert!(session_dir.is_dir(), "session_dir should be created");
+        assert!(wav_path.exists(), "wav file should be created");
+
+        // Finalize so we don't leak the file handle.
+        let mut guard = handle.lock().unwrap();
+        if let Some(w) = guard.take() {
+            w.finalize().unwrap();
+        }
+    }
+
+    #[test]
+    fn create_wav_writer_fails_when_parent_path_is_a_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let blocking_file = temp.path().join("blocker");
+        std::fs::write(&blocking_file, b"").unwrap();
+
+        // Asking to create the session dir at a path occupied by a regular
+        // file should fail at create_dir_all.
+        let result = create_wav_writer(&blocking_file, 16_000);
+
+        assert!(result.is_err());
+    }
+
     #[tokio::test]
     async fn record_passes_sample_rate_session_control_and_events_to_engine() {
         let engine = Arc::new(FakeCpalRecordingEngine::success());
