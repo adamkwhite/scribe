@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_name: scribe-linux-x86_64.tar.gz
+          - os: macos-latest
+            asset_name: scribe-macos-aarch64.tar.gz
+          - os: windows-latest
+            asset_name: scribe-windows-x86_64.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Linux native build dependencies
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y libasound2-dev clang libclang-dev cmake
+
+      - name: Build release binaries (Windows)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cargo build -p scribe --release
+          cargo build -p scribe-cli --release
+          cargo build -p scribe-tui --features tui --release
+
+      - name: Build release binaries (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cargo build -p scribe-cli --release
+          cargo build -p scribe-tui --features tui --release
+
+      - name: Stage artifacts (Unix)
+        if: matrix.os != 'windows-latest'
+        run: |
+          mkdir -p stage
+          cp target/release/scribe-cli stage/
+          cp target/release/scribe-tui stage/
+          cp README.md LICENSE stage/
+          tar -czf "${{ matrix.asset_name }}" -C stage .
+
+      - name: Stage artifacts (Windows)
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path stage | Out-Null
+          Copy-Item target\release\scribe.exe stage\
+          Copy-Item target\release\scribe-cli.exe stage\
+          Copy-Item target\release\scribe-tui.exe stage\
+          Copy-Item README.md, LICENSE stage\
+          Compress-Archive -Path stage\* -DestinationPath "${{ matrix.asset_name }}"
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.asset_name }}
+          fail_on_unmatched_files: true
+          generate_release_notes: true
