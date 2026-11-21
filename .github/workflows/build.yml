@@ -8,8 +8,10 @@ on:
   push:
     branches:
       - main
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
   pull_request:
     types: [opened, synchronize, reopened]
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
 
 jobs:
   sonarqube:

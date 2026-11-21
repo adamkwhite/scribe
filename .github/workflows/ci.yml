@@ -7,8 +7,10 @@ concurrency:
 on:
   push:
     branches: [main]
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
   pull_request:
     types: [opened, reopened, ready_for_review, synchronize]
+    paths-ignore: ['*.md', 'docs/**', 'LICENSE', '.gitignore']
 
 env:
   CARGO_TERM_COLOR: always
